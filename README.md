@@ -1,115 +1,132 @@
 # Adversarial Structural Estimation on a Single Network
 Minimal MVP for adversarial estimation of a linear-in-means structural model from one synthetic observed equilibrium on a single graph.
 
-## Install (Exact)
+## Installation
 
-### Option 1: Conda Environment (Locked Dependencies - Recommended)
-Use the committed lock file for exact dependency resolution:
+### Prerequisites
+- Python `>=3.11`
+- One of:
+  - Conda + `conda-lock` (exact locked environment; lock file is `win-64`)
+  - pip/venv (editable install)
 
+### Option 1: Conda + lock file (exact, recommended on Windows)
 ```bash
 conda-lock install -n adversarial_networks conda-lock.yml
 conda activate adversarial_networks
 pip install -e .
 ```
 
-If you need to regenerate the lock:
-
+Re-generate the lock file (if `environment.yml` changes):
 ```bash
 conda-lock -f environment.yml -p win-64
 ```
 
-### Option 2: pip (Development Mode)
-For rapid development with editable install:
-
+### Option 2: Conda from `environment.yml` (portable)
 ```bash
+conda env create -n adversarial_networks -f environment.yml
+conda activate adversarial_networks
 pip install -e .
-pip install -e .[dev]  # Include development tools (pytest, pytest-html, ruff)
 ```
 
-**Tested baseline platform:**
-- OS: Windows 10
-- Python: 3.11.9
-- Device: CPU
+### Option 3: pip editable install (development)
+```bash
+pip install -e .[dev]
+pip install notebook jupyterlab
+```
 
-## Verify Tests
-Run tests from repository root:
+### Verify installation
+Run from repository root:
+```bash
+python -c "import src; from src import SCMGenerator, RootedMPNNDiscriminator, RootSampler; print('src version:', src.__version__)"
+```
 
+## Usage
+
+### 1) Run tests
 ```bash
 pytest
 ```
 
-This will:
-- Run all 4 deterministic CPU tests with verbose output
-- Generate an HTML test report at `tests/reports/report.html`
-- Show detailed expected vs actual values for any failures
+What this does:
+- Runs the current test suite in `tests/` (17 tests at the time of writing).
+- Writes an HTML report to `tests/reports/report.html`.
 
-For strict warning checking (repo code only):
-
+Strict warnings mode:
 ```bash
 python -W error -m pytest
 ```
 
-The `pytest.ini` includes narrow filters for unavoidable third-party deprecation warnings from PyG/Torch integration.
-
-## Run Experiment
+### 2) Run the end-to-end notebook
 From repository root:
-
 ```bash
-jupyter notebook
+jupyter notebook experiments/linear_in_means_model.ipynb
 ```
 
-Open `experiments/linear_in_means_model.ipynb` and run all cells.  
-The notebook writes artifacts to `artifacts/runs/<RUN_ID>/` and includes `run_manifest.json` with:
-- package versions
-- platform info
-- git metadata (`null` if unavailable)
-- SHA256 hashes for `environment.yml`, `conda-lock.yml`, and produced artifacts
+The notebook:
+- Loads code from `src/`.
+- Runs the C1-C14 workflow.
+- Writes run outputs to `artifacts/runs/<RUN_ID>/` and saves `run_manifest.json` with versions, platform, git metadata, and file hashes.
 
-Tracked baseline release artifacts are in `artifacts/baseline/`.
+Notes:
+- Default notebook config is large-scale (`n_nodes=250000`, `n_steps=800`) and can take significant time on CPU.
+- For a fast local smoke run, edit cell C2 and override config (example):
+
+```python
+from dataclasses import replace
+from config import ExperimentConfig
+
+cfg = ExperimentConfig.default()
+cfg = replace(
+    cfg,
+    graph=replace(cfg.graph, n_nodes=5000, graph_type="ba"),
+    training=replace(
+        cfg.training,
+        n_steps=100,
+        n_disc=1,
+        batch_size=32,
+        root_sampler_mode="uniform",
+    ),
+)
+```
+
+### 3) Optional: run lint checks
+```bash
+ruff check src tests
+```
 
 ## Repository Structure
+Tracked files users see in GitHub:
+
 ```text
 adversarial_networks/
-├── docs/
-│   ├── design_doc.md                    # Complete design specification
-│   ├── paper.md                         # Theory and results
-│   └── paper_structure.md               # Paper outline
-├── src/
-│   ├── __init__.py                      # Package exports and version
-│   ├── generator.py                     # SCMGenerator (structural causal model)
-│   ├── discriminator.py                 # RootedMPNNDiscriminator (GIN-based classifier)
-│   ├── utils.py                         # Network utilities (W matrix, ego-batching)
-│   ├── config.py                        # Configuration dataclasses
-│   ├── constants.py                     # Named constants
-│   ├── visualization.py                 # Plotting utilities
-│   └── io_utils.py                      # I/O functions (CSV, JSON, hashing)
-├── experiments/
-│   └── linear_in_means_model.ipynb      # End-to-end demo (C1-C14)
-├── artifacts/
-│   ├── baseline/                        # Tracked release artifacts
-│   │   ├── fig01_observed_data.png
-│   │   ├── fig02_theta_convergence.png
-│   │   ├── fig03_loss_convergence.png
-│   │   ├── fig04_discriminator_scores.png
-│   │   ├── fig05_Y_distributions.png
-│   │   ├── fig06_tail_stability.png
-│   │   ├── run_manifest.json
-│   │   ├── tab01_data_summary.csv
-│   │   ├── tab02_estimation_results.csv
-│   │   └── tab03_convergence_tail.csv
-│   └── runs/                            # Local runs (gitignored)
-├── tests/
-│   ├── conftest.py                      # Shared pytest fixtures
-│   ├── test_utils.py                    # 4 core tests with enhanced assertions
-│   └── reports/                         # HTML test reports (gitignored)
-├── .gitignore
-├── CHANGELOG.md
-├── conda-lock.yml                       # Locked dependencies
-├── environment.yml                      # Editable dependency spec
-├── pyproject.toml                       # Python packaging and tool config
-├── pytest.ini                           # pytest configuration
-└── README.md
+|-- experiments/
+|   `-- linear_in_means_model.ipynb
+|-- src/
+|   |-- __init__.py
+|   |-- config.py
+|   |-- constants.py
+|   |-- discriminator.py
+|   |-- generator.py
+|   |-- io_utils.py
+|   |-- plot_style.py
+|   |-- root_sampling.py
+|   |-- utils.py
+|   `-- visualization.py
+|-- tests/
+|   |-- conftest.py
+|   |-- test_root_sampling.py
+|   |-- test_utils.py
+|   `-- test_visualization.py
+|-- .gitignore
+|-- CHANGELOG.md
+|-- conda-lock.yml
+|-- environment.yml
+|-- pyproject.toml
+|-- pytest.ini
+`-- README.md
 ```
+
+Gitignored local paths (not part of the GitHub tree) include `artifacts/`, `docs/`, `tests/reports/`, `.pytest_cache/`, `*.egg-info/`, and `__pycache__/`.
 
 ## References
 - Kaji, T., Manresa, E., and Pouliot, G. (2023). *An Adversarial Approach to Structural Estimation*. Econometrica 91(6): 2041-2063. DOI: 10.3982/ECTA18707.
