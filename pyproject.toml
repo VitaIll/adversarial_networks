@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adversarial-networks"
+version = "0.1.0"
+description = "Adversarial structural estimation on a single network (linear-in-means MVP)"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    {name = "Research Team"}
+]
+license = {text = "MIT"}
+
+dependencies = [
+    "torch>=2.0",
+    "torch-geometric>=2.4",
+    "networkx>=3.0",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-html>=4.0",
+    "ruff>=0.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--html=tests/reports/report.html",
+    "--self-contained-html",
+]
+filterwarnings = [
+    "ignore:`torch_geometric.distributed` has been deprecated:DeprecationWarning",
+    "ignore:`torch.jit.script` is deprecated:DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["__pycache__", ".pytest_cache", "artifacts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = ["E501"]  # Line too long (handled by formatter)

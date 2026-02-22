@@ -1,0 +1,23 @@
+# environments
+env/
+.conda/
+.venv/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# notebooks
+.ipynb_checkpoints/
+experiments/*.executed.ipynb
+
+# docs and artifacts
+/docs/
+/artifacts/
+
+# test reports
+tests/reports/
