@@ -282,3 +282,74 @@ def extract_ego_batch(
     root_offsets = torch.tensor(root_positions, dtype=torch.long, device=ptr.device)
     root_indices = ptr + root_offsets
     return batch, root_indices
+
+
+def check_gan_convergence(
+    loss_d_history: list[float],
+    loss_g_history: list[float],
+    window: int,
+    delta_d: float,
+    delta_g: float,
+    min_steps: int | None = None,
+    std_d_max: float | None = None,
+    std_g_max: float | None = None,
+) -> tuple[bool, float, float]:
+    """Check whether GAN losses have stabilized near theoretical equilibrium.
+
+    Args:
+        loss_d_history: Per-step discriminator loss history.
+        loss_g_history: Per-step generator loss history.
+        window: Rolling mean window size.
+        delta_d: Absolute tolerance around ``2 * log(2)`` for discriminator loss.
+        delta_g: Absolute tolerance around ``log(2)`` for generator loss.
+        min_steps: Optional earliest step where convergence can be declared.
+        std_d_max: Optional upper bound for rolling discriminator-loss std.
+        std_g_max: Optional upper bound for rolling generator-loss std.
+
+    Returns:
+        Tuple ``(converged, rolling_mean_d, rolling_mean_g)`` where rolling means are
+        ``nan`` until enough observations exist for the configured window and minimum
+        step requirement.
+
+    Raises:
+        ValueError: If history lengths differ or thresholds are invalid.
+    """
+    if len(loss_d_history) != len(loss_g_history):
+        raise ValueError(
+            "loss_d_history and loss_g_history must have equal length, got "
+            f"{len(loss_d_history)} and {len(loss_g_history)}"
+        )
+    if window <= 0:
+        raise ValueError(f"window must be positive, got {window}")
+    if delta_d <= 0.0:
+        raise ValueError(f"delta_d must be positive, got {delta_d}")
+    if delta_g <= 0.0:
+        raise ValueError(f"delta_g must be positive, got {delta_g}")
+    if min_steps is not None and min_steps < 0:
+        raise ValueError(f"min_steps must be non-negative when provided, got {min_steps}")
+    if std_d_max is not None and std_d_max <= 0.0:
+        raise ValueError(f"std_d_max must be positive when provided, got {std_d_max}")
+    if std_g_max is not None and std_g_max <= 0.0:
+        raise ValueError(f"std_g_max must be positive when provided, got {std_g_max}")
+
+    effective_min_steps = int(min_steps) if min_steps is not None else 0
+    step = len(loss_d_history)
+    if step < effective_min_steps or step < window:
+        return False, float("nan"), float("nan")
+
+    tail_d = loss_d_history[-window:]
+    tail_g = loss_g_history[-window:]
+    rolling_d = sum(tail_d) / float(window)
+    rolling_g = sum(tail_g) / float(window)
+    var_d = sum((value - rolling_d) ** 2 for value in tail_d) / float(window)
+    var_g = sum((value - rolling_g) ** 2 for value in tail_g) / float(window)
+    std_d = math.sqrt(max(0.0, var_d))
+    std_g = math.sqrt(max(0.0, var_g))
+
+    d_ok = abs(rolling_d - (2.0 * math.log(2.0))) < delta_d
+    g_ok = abs(rolling_g - math.log(2.0)) < delta_g
+    if std_d_max is not None:
+        d_ok = d_ok and (std_d <= std_d_max)
+    if std_g_max is not None:
+        g_ok = g_ok and (std_g <= std_g_max)
+    return (d_ok and g_ok), rolling_d, rolling_g

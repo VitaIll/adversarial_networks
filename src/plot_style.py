@@ -160,7 +160,7 @@ def add_reference_line(
         transform = blended_transform_factory(ax.transAxes, ax.transData)
         ax.annotate(
             text,
-            xy=(0.985, value),
+            xy=(0.965, value),
             xycoords=transform,
             xytext=(0, 2),
             textcoords="offset points",
@@ -169,7 +169,7 @@ def add_reference_line(
             fontsize=ANNOTATION_FONTSIZE,
             color="black",
             bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15},
-            clip_on=True,
+            clip_on=False,
         )
         return
 
@@ -178,7 +178,7 @@ def add_reference_line(
         transform = blended_transform_factory(ax.transData, ax.transAxes)
         ax.annotate(
             text,
-            xy=(value, 0.985),
+            xy=(value, 0.965),
             xycoords=transform,
             xytext=(2, 0),
             textcoords="offset points",
@@ -188,7 +188,7 @@ def add_reference_line(
             fontsize=ANNOTATION_FONTSIZE,
             color="black",
             bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15},
-            clip_on=True,
+            clip_on=False,
         )
         return
 

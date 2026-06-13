@@ -135,7 +135,7 @@ class ModelConfig:
     k: int = 2
     """Ego radius used for extracted rooted subgraphs; larger `k` increases local context and overlap."""
 
-    beta_cap: float = 0.8
+    beta_cap: float = 1.0
     """Upper bound on |beta| via reparameterization; lower values enforce stronger contraction."""
 
     picard_tol: float = 1e-6
@@ -154,8 +154,8 @@ class ModelConfig:
         """Validate configuration parameters."""
         if self.k <= 0:
             raise ValueError(f"k must be positive, got {self.k}")
-        if not (0.0 < self.beta_cap < 1.0):
-            raise ValueError(f"beta_cap must satisfy 0 < beta_cap < 1, got {self.beta_cap}")
+        if not (0.0 < self.beta_cap <= 1.0):
+            raise ValueError(f"beta_cap must satisfy 0 < beta_cap <= 1, got {self.beta_cap}")
         if self.picard_tol <= 0.0:
             raise ValueError(f"picard_tol must be positive, got {self.picard_tol}")
         if self.picard_max <= 0:
@@ -183,6 +183,9 @@ class TrainingConfig:
 
     lr_g: float = 5e-3
     """Generator optimizer learning rate."""
+
+    grad_clip_norm_g: float = 5.0
+    """Max norm for generator gradient clipping before the optimizer step."""
 
     root_sampler_mode: (
         Literal["uniform", "disjoint_once", "disjoint_best_of_k", "disjoint_relax"] | None
@@ -276,6 +279,10 @@ class TrainingConfig:
             raise ValueError(f"lr_d must be positive, got {self.lr_d}")
         if self.lr_g <= 0.0:
             raise ValueError(f"lr_g must be positive, got {self.lr_g}")
+        if self.grad_clip_norm_g <= 0.0:
+            raise ValueError(
+                f"grad_clip_norm_g must be positive, got {self.grad_clip_norm_g}"
+            )
         if self.root_sampler_mode is not None and self.root_sampler_mode not in {
             "uniform",
             "disjoint_once",
@@ -439,6 +446,247 @@ class InitParams:
 
 
 @dataclass(frozen=True)
+class MonteCarloConfig:
+    """Configuration for repeated Monte Carlo realizations and stopping logic."""
+
+    n_realizations: int = 50000
+    """Number of independent ground-truth realizations to run."""
+
+    plot_every_n_realizations: int = 10
+    """Regenerate Monte Carlo charts every N logged realizations during a run."""
+
+    progress_every_n_steps: int | None = None
+    """If set, print per-step parameter/loss diagnostics every N generator steps."""
+
+    master_seed: int = 42
+    """Master seed used to derive deterministic per-phase random seeds."""
+
+    init_sigma_sq_fixed_unit: bool = True
+    """If True, always initialize generator sigma_sq at 1.0 (log_sigma_sq = 0.0)."""
+
+    init_uniform_beta_range: tuple[float, float] = (0.0, 0.5)
+    """Support bounds for uniform beta initializations."""
+
+    init_uniform_gamma_range: tuple[float, float] = (0.0, 0.5)
+    """Support bounds for uniform gamma initializations."""
+
+    init_uniform_log_sigma_sq_range: tuple[float, float] = (-0.8, 0.8)
+    """Support bounds for uniform log(sigma_sq) initializations."""
+
+    convergence_window: int = 100
+    """Rolling window size for convergence diagnostics."""
+
+    convergence_delta_d: float = 0.01
+    """Absolute tolerance for discriminator rolling loss around ``2*log(2)``."""
+
+    convergence_delta_g: float = 0.01
+    """Absolute tolerance for generator rolling loss around ``log(2)``."""
+
+    convergence_std_d_max: float = 0.1
+    """Maximum allowed rolling std of discriminator loss in the convergence window."""
+
+    convergence_std_g_max: float = 0.1
+    """Maximum allowed rolling std of generator loss in the convergence window."""
+
+    min_steps: int | None = 700
+    """Optional minimum generator steps before convergence can be declared."""
+
+    max_steps: int | None = 2000
+    """Optional hard cap on generator steps per realization. ``None`` means unbounded."""
+
+    equilibrium_dwell_steps: int = 50
+    """Required consecutive in-band equilibrium steps before stopping."""
+
+    stability_window: int = 30
+    """Window length used to verify parameter stabilization before stopping."""
+
+    stability_beta_range_tol: float = 0.01
+    """Max allowed beta range over ``stability_window`` to treat beta as stable."""
+
+    stability_gamma_range_tol: float = 0.01
+    """Max allowed gamma range over ``stability_window`` to treat gamma as stable."""
+
+    stability_sigma_sq_range_tol: float = 0.1
+    """Max allowed sigma_sq range over ``stability_window`` to treat sigma_sq as stable."""
+
+    adaptive_anneal_enabled: bool = False
+    """Whether to adaptively extend annealing when convergence has not been reached."""
+
+    adaptive_anneal_buffer_steps: int = 40
+    """Extra annealing horizon maintained ahead of current step in adaptive mode."""
+
+    output_dir: str = "artifacts/mc_asymptotic"
+    """Directory where Monte Carlo outputs are written."""
+
+    lr_g_decay_steps: tuple[int, ...] = (220, 420, 620, 780)
+    """Generator learning-rate decay milestones in generator-step units."""
+
+    lr_g_decay_factor: float = 1.0
+    """Multiplicative learning-rate decay factor applied at each milestone."""
+
+    grad_clip_norm: float = 10.0
+    """Maximum norm for generator gradient clipping."""
+
+    def __post_init__(self) -> None:
+        """Validate Monte Carlo configuration parameters."""
+        if self.n_realizations <= 0:
+            raise ValueError(
+                f"n_realizations must be positive, got {self.n_realizations}"
+            )
+        if self.plot_every_n_realizations <= 0:
+            raise ValueError(
+                "plot_every_n_realizations must be positive, got "
+                f"{self.plot_every_n_realizations}"
+            )
+        if (
+            self.progress_every_n_steps is not None
+            and self.progress_every_n_steps <= 0
+        ):
+            raise ValueError(
+                "progress_every_n_steps must be positive when provided, got "
+                f"{self.progress_every_n_steps}"
+            )
+        if self.master_seed < 0:
+            raise ValueError(f"master_seed must be non-negative, got {self.master_seed}")
+        if len(self.init_uniform_beta_range) != 2:
+            raise ValueError(
+                "init_uniform_beta_range must contain exactly two bounds, got "
+                f"{self.init_uniform_beta_range}"
+            )
+        if len(self.init_uniform_gamma_range) != 2:
+            raise ValueError(
+                "init_uniform_gamma_range must contain exactly two bounds, got "
+                f"{self.init_uniform_gamma_range}"
+            )
+        if len(self.init_uniform_log_sigma_sq_range) != 2:
+            raise ValueError(
+                "init_uniform_log_sigma_sq_range must contain exactly two bounds, got "
+                f"{self.init_uniform_log_sigma_sq_range}"
+            )
+        beta_low, beta_high = (
+            float(self.init_uniform_beta_range[0]),
+            float(self.init_uniform_beta_range[1]),
+        )
+        gamma_low, gamma_high = (
+            float(self.init_uniform_gamma_range[0]),
+            float(self.init_uniform_gamma_range[1]),
+        )
+        log_s_low, log_s_high = (
+            float(self.init_uniform_log_sigma_sq_range[0]),
+            float(self.init_uniform_log_sigma_sq_range[1]),
+        )
+        if not (beta_low < beta_high):
+            raise ValueError(
+                "init_uniform_beta_range must satisfy low < high, got "
+                f"{self.init_uniform_beta_range}"
+            )
+        if beta_low <= -1.0 or beta_high >= 1.0:
+            raise ValueError(
+                "init_uniform_beta_range must satisfy -1 < low < high < 1 for "
+                "identification (rho(W)=1 under row-stochastic normalization), got "
+                f"{self.init_uniform_beta_range}"
+            )
+        if not (gamma_low < gamma_high):
+            raise ValueError(
+                "init_uniform_gamma_range must satisfy low < high, got "
+                f"{self.init_uniform_gamma_range}"
+            )
+        if not (log_s_low < log_s_high):
+            raise ValueError(
+                "init_uniform_log_sigma_sq_range must satisfy low < high, got "
+                f"{self.init_uniform_log_sigma_sq_range}"
+            )
+        if self.convergence_window <= 0:
+            raise ValueError(
+                f"convergence_window must be positive, got {self.convergence_window}"
+            )
+        if self.convergence_delta_d <= 0.0:
+            raise ValueError(
+                "convergence_delta_d must be positive, "
+                f"got {self.convergence_delta_d}"
+            )
+        if self.convergence_delta_g <= 0.0:
+            raise ValueError(
+                "convergence_delta_g must be positive, "
+                f"got {self.convergence_delta_g}"
+            )
+        if self.convergence_std_d_max <= 0.0:
+            raise ValueError(
+                "convergence_std_d_max must be positive, got "
+                f"{self.convergence_std_d_max}"
+            )
+        if self.convergence_std_g_max <= 0.0:
+            raise ValueError(
+                "convergence_std_g_max must be positive, got "
+                f"{self.convergence_std_g_max}"
+            )
+        if self.min_steps is not None and self.min_steps < 0:
+            raise ValueError(f"min_steps must be non-negative when provided, got {self.min_steps}")
+        if (
+            self.max_steps is not None
+            and self.min_steps is not None
+            and self.max_steps < self.min_steps
+        ):
+            raise ValueError(
+                f"max_steps must be >= min_steps, got {self.max_steps} < {self.min_steps}"
+            )
+        if self.equilibrium_dwell_steps <= 0:
+            raise ValueError(
+                "equilibrium_dwell_steps must be positive, got "
+                f"{self.equilibrium_dwell_steps}"
+            )
+        if self.stability_window <= 0:
+            raise ValueError(
+                f"stability_window must be positive, got {self.stability_window}"
+            )
+        if self.max_steps is not None:
+            min_start = int(self.min_steps) if self.min_steps is not None else 0
+            earliest_stop = max(
+                self.convergence_window + self.equilibrium_dwell_steps - 1,
+                self.stability_window,
+                min_start + self.equilibrium_dwell_steps - 1,
+            )
+            if self.max_steps < earliest_stop:
+                raise ValueError(
+                    "max_steps too small for convergence monitoring windows, got "
+                    f"max_steps={self.max_steps}, earliest_feasible_stop={earliest_stop}"
+                )
+        if self.stability_beta_range_tol <= 0.0:
+            raise ValueError(
+                "stability_beta_range_tol must be positive, got "
+                f"{self.stability_beta_range_tol}"
+            )
+        if self.stability_gamma_range_tol <= 0.0:
+            raise ValueError(
+                "stability_gamma_range_tol must be positive, got "
+                f"{self.stability_gamma_range_tol}"
+            )
+        if self.stability_sigma_sq_range_tol <= 0.0:
+            raise ValueError(
+                "stability_sigma_sq_range_tol must be positive, got "
+                f"{self.stability_sigma_sq_range_tol}"
+            )
+        if self.adaptive_anneal_buffer_steps <= 0:
+            raise ValueError(
+                "adaptive_anneal_buffer_steps must be positive, got "
+                f"{self.adaptive_anneal_buffer_steps}"
+            )
+        if not self.output_dir.strip():
+            raise ValueError("output_dir must be non-empty.")
+        if any(step <= 0 for step in self.lr_g_decay_steps):
+            raise ValueError("lr_g_decay_steps must contain positive step indices.")
+        if tuple(sorted(self.lr_g_decay_steps)) != self.lr_g_decay_steps:
+            raise ValueError("lr_g_decay_steps must be sorted in ascending order.")
+        if self.lr_g_decay_factor <= 0.0 or self.lr_g_decay_factor > 1.0:
+            raise ValueError(
+                "lr_g_decay_factor must satisfy 0 < factor <= 1, got "
+                f"{self.lr_g_decay_factor}"
+            )
+        if self.grad_clip_norm <= 0.0:
+            raise ValueError(f"grad_clip_norm must be positive, got {self.grad_clip_norm}")
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     """Complete experiment configuration."""
 
@@ -481,4 +729,263 @@ class ExperimentConfig:
             instance_noise=InstanceNoiseConfig(),
             true_params=TrueParams(),
             init_params=InitParams(),
+        )
+
+    @classmethod
+    def mc_default(cls) -> ExperimentConfig:
+        """Create Monte Carlo-scaled configuration from the MC design document."""
+        return cls(
+            graph=GraphConfig(
+                n_nodes=10000,
+                graph_type="ba",
+                ba_m=2,
+                seed=42,
+            ),
+            model=ModelConfig(
+                k=2,
+                beta_cap=0.85,
+                picard_tol=1e-6,
+                picard_max=20,
+                hidden_dim=12,
+                logit_clip=4.0,
+            ),
+            training=TrainingConfig(
+                n_steps=900,
+                batch_size=17,
+                n_disc=1,
+                lr_d=2e-4,
+                lr_g=3e-3,
+                root_sampler_mode="uniform",
+                root_exclusion_r=0,
+                disjoint_restarts_k=1,
+                disjoint_min_batch=17,
+                disjoint_relax_sequence=(0,),
+                disjoint_fallback="best",
+                min_roots_per_call=17,
+                mix_p_uniform=0.0,
+            ),
+            instance_noise=InstanceNoiseConfig(
+                enabled=True,
+                tau_x0=1.0,
+                tau_y0=1.0,
+                schedule="linear",
+                anneal_steps=2000,
+                min_tau=0.0,
+                apply_to="both",
+            ),
+            true_params=TrueParams(
+                beta=0.4,
+                gamma=1.5,
+                sigma_sq=1.0,
+            ),
+            init_params=InitParams(
+                beta=0.0,
+                gamma=0.0,
+                log_sigma_sq=0.0,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class EffortTrueParams:
+    """Ground-truth parameters for the nonlinear effort-game data generator."""
+
+    gamma: float = 1.5
+    """True exogenous covariate effect."""
+
+    lambda_: float = 2.0 / 3.0
+    """True conformity strength (implies contraction rate rho = 0.4)."""
+
+    mu: float = 0.5
+    """True precautionary motive scale."""
+
+    r: float = 1.0
+    """True precautionary curvature."""
+
+    sigma_sq: float = 1.0
+    """True idiosyncratic shock variance."""
+
+    def __post_init__(self) -> None:
+        """Validate true effort-game parameter values."""
+        if self.lambda_ <= 0.0:
+            raise ValueError(f"lambda_ must be positive, got {self.lambda_}")
+        if self.mu < 0.0:
+            raise ValueError(f"mu must be non-negative, got {self.mu}")
+        if self.r <= 0.0:
+            raise ValueError(f"r must be positive, got {self.r}")
+        if self.sigma_sq <= 0.0:
+            raise ValueError(f"sigma_sq must be positive, got {self.sigma_sq}")
+
+
+@dataclass(frozen=True)
+class EffortInitParams:
+    """Initial parameter values for the effort-game generator."""
+
+    gamma: float = 0.0
+    """Initial gamma."""
+
+    lambda_: float = 0.5
+    """Initial constrained lambda."""
+
+    mu: float = 0.1
+    """Initial mu."""
+
+    r: float = 1.0
+    """Initial r (used only when r is learnable)."""
+
+    log_sigma_sq: float = 0.0
+    """Initial log-variance."""
+
+    def __post_init__(self) -> None:
+        """Validate effort-game initialization values."""
+        if self.lambda_ <= 0.0:
+            raise ValueError(f"lambda_ must be positive, got {self.lambda_}")
+        if self.mu <= 0.0:
+            raise ValueError(f"mu must be positive, got {self.mu}")
+        if self.r <= 0.0:
+            raise ValueError(f"r must be positive, got {self.r}")
+
+
+@dataclass(frozen=True)
+class EffortModelConfig:
+    """Model controls for effort-game equilibrium solving and discriminator capacity."""
+
+    k: int = 2
+    """Ego radius used for rooted subgraph extraction."""
+
+    lambda_max: float = 4.0
+    """Soft upper bound for lambda via sigmoid reparameterization."""
+
+    picard_tol: float = 1e-7
+    """Picard stopping tolerance."""
+
+    picard_max: int = 100
+    """Maximum Picard iterations."""
+
+    newton_tol: float = 1e-10
+    """Newton stopping tolerance inside each Picard step."""
+
+    newton_max: int = 8
+    """Maximum Newton iterations."""
+
+    fix_r: float | None = 1.0
+    """If float, keep r fixed at this value; if None, estimate r."""
+
+    fix_sigma_sq: float | None = 1.0
+    """If float, keep sigma_sq fixed at this value; if None, estimate sigma_sq."""
+
+    hidden_dim: int = 64
+    """Discriminator hidden width."""
+
+    discriminator_layers: int | None = None
+    """Number of discriminator message-passing layers.
+
+    When ``None``, it resolves to ``k`` so discriminator receptive field
+    matches the extracted ego radius.
+    """
+
+    logit_clip: float = 10.0
+    """Discriminator logit clip bound."""
+
+    def resolved_discriminator_layers(self) -> int:
+        """Resolve discriminator message-passing depth."""
+        if self.discriminator_layers is None:
+            return int(self.k)
+        return int(self.discriminator_layers)
+
+    def __post_init__(self) -> None:
+        """Validate effort-game model configuration values."""
+        if self.k <= 0:
+            raise ValueError(f"k must be positive, got {self.k}")
+        if self.lambda_max <= 0.0:
+            raise ValueError(f"lambda_max must be positive, got {self.lambda_max}")
+        if self.picard_tol <= 0.0:
+            raise ValueError(f"picard_tol must be positive, got {self.picard_tol}")
+        if self.picard_max <= 0:
+            raise ValueError(f"picard_max must be positive, got {self.picard_max}")
+        if self.newton_tol <= 0.0:
+            raise ValueError(f"newton_tol must be positive, got {self.newton_tol}")
+        if self.newton_max <= 0:
+            raise ValueError(f"newton_max must be positive, got {self.newton_max}")
+        if self.fix_r is not None and self.fix_r <= 0.0:
+            raise ValueError(f"fix_r must be positive when provided, got {self.fix_r}")
+        if self.fix_sigma_sq is not None and self.fix_sigma_sq <= 0.0:
+            raise ValueError(
+                "fix_sigma_sq must be positive when provided, got "
+                f"{self.fix_sigma_sq}"
+            )
+        if self.hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {self.hidden_dim}")
+        if self.discriminator_layers is not None and self.discriminator_layers <= 0:
+            raise ValueError(
+                "discriminator_layers must be positive when provided, got "
+                f"{self.discriminator_layers}"
+            )
+        if self.resolved_discriminator_layers() < self.k:
+            raise ValueError(
+                "resolved discriminator_layers must be >= k so the discriminator can "
+                f"aggregate the full {self.k}-hop ego context; got "
+                f"{self.resolved_discriminator_layers()} < {self.k}"
+            )
+        if self.logit_clip <= 0.0:
+            raise ValueError(f"logit_clip must be positive, got {self.logit_clip}")
+
+
+@dataclass(frozen=True)
+class EffortExperimentConfig:
+    """Complete experiment configuration for nonlinear effort-game estimation."""
+
+    graph: GraphConfig
+    """Topology-generation controls."""
+
+    model: EffortModelConfig
+    """Effort-game model and discriminator controls."""
+
+    training: TrainingConfig
+    """Optimization and root-sampling controls."""
+
+    instance_noise: InstanceNoiseConfig
+    """Optional blur controls for discriminator-input regularization."""
+
+    true_params: EffortTrueParams
+    """Ground-truth effort-game parameters."""
+
+    init_params: EffortInitParams
+    """Initial generator parameters."""
+
+    def __post_init__(self) -> None:
+        """Cross-component consistency checks for effort-game experiments."""
+        if self.model.resolved_discriminator_layers() < self.model.k:
+            raise ValueError(
+                "resolved discriminator_layers must be >= k for effort-game "
+                "identification context."
+            )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "graph": asdict(self.graph),
+            "model": asdict(self.model),
+            "training": asdict(self.training),
+            "instance_noise": asdict(self.instance_noise),
+            "true_params": asdict(self.true_params),
+            "init_params": asdict(self.init_params),
+        }
+
+    @classmethod
+    def default(cls) -> EffortExperimentConfig:
+        """Create default configuration for effort-game experiments."""
+        return cls(
+            graph=GraphConfig(),
+            model=EffortModelConfig(k=2),
+            training=TrainingConfig(
+                n_steps=2000,
+                n_disc=1,
+                lr_d=2e-4,
+                lr_g=7e-3,
+                grad_clip_norm_g=25.0,
+            ),
+            instance_noise=InstanceNoiseConfig(tau_y0=1.5, anneal_steps=2500),
+            true_params=EffortTrueParams(),
+            init_params=EffortInitParams(),
         )

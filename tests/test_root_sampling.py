@@ -207,7 +207,7 @@ def _run_training_smoke(mode: str) -> dict[str, int | str]:
         init_gamma=0.0,
         init_log_sigma_sq=0.0,
     )
-    discriminator = RootedMPNNDiscriminator(hidden_dim=16, logit_clip=10.0)
+    discriminator = RootedMPNNDiscriminator(hidden_dim=16, num_layers=k_hops, logit_clip=10.0)
     opt_d = torch.optim.Adam(discriminator.parameters(), lr=1e-3)
     opt_g = torch.optim.Adam(generator.parameters(), lr=2e-3)
 

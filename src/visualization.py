@@ -25,8 +25,10 @@ try:
         add_reference_line,
         apply_paper_style,
         figure_size,
+        line_style,
         series_style,
         style_axes,
+        style_histogram_patches,
     )
 except ImportError:
     # Notebook/local import path when `src/` is added to sys.path.
@@ -40,8 +42,10 @@ except ImportError:
         add_reference_line,
         apply_paper_style,
         figure_size,
+        line_style,
         series_style,
         style_axes,
+        style_histogram_patches,
     )
 
 GRAYSCALE_CMAPS = {
@@ -382,6 +386,281 @@ def plot_ground_truth_graph_outcomes(
         )
 
     ax.set_axis_off()
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=FIGURE_DPI, format="png")
+    plt.close(fig)
+
+
+def _validate_quantiles(quantiles: tuple[float, ...]) -> None:
+    """Validate quantile tuple for envelope plotting."""
+    if len(quantiles) != 5:
+        raise ValueError(f"quantiles must contain 5 values, got {len(quantiles)}")
+    if any((quantile < 0.0 or quantile > 1.0) for quantile in quantiles):
+        raise ValueError("quantiles must be in [0, 1].")
+    if tuple(sorted(quantiles)) != quantiles:
+        raise ValueError("quantiles must be sorted in ascending order.")
+
+
+def _pad_history(arr: np.ndarray, target_len: int) -> np.ndarray:
+    """Pad/truncate one history array to target length using edge padding."""
+    if target_len <= 0:
+        raise ValueError(f"target_len must be positive, got {target_len}")
+    values = np.asarray(arr, dtype=np.float64).reshape(-1)
+    if values.size == 0:
+        raise ValueError("History arrays must be non-empty.")
+    if values.size < target_len:
+        pad_width = target_len - values.size
+        return np.pad(values, (0, pad_width), mode="edge")
+    return values[:target_len]
+
+
+def _trailing_rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
+    """Compute trailing moving average with min-periods=1 and fixed output length."""
+    if window <= 0:
+        raise ValueError(f"window must be positive, got {window}")
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    if arr.size == 0:
+        raise ValueError("values cannot be empty.")
+
+    cumsum = np.cumsum(arr, dtype=np.float64)
+    out = np.empty_like(arr)
+    for idx in range(arr.size):
+        start = max(0, idx - window + 1)
+        total = cumsum[idx] - (cumsum[start - 1] if start > 0 else 0.0)
+        out[idx] = total / float(idx - start + 1)
+    return out
+
+
+def plot_mc_parameter_distributions(
+    results: list[dict],
+    true_params: dict[str, float],
+    save_path: Path,
+    n_bins: int = 25,
+) -> None:
+    """Plot histograms of parameter estimation errors across MC realizations.
+
+    Args:
+        results: Per-realization result rows with ``*_hat`` entries.
+        true_params: True values for ``beta``, ``gamma``, and ``sigma_sq``.
+        save_path: Output path for the PNG figure.
+        n_bins: Histogram bin count.
+
+    Raises:
+        ValueError: If required values are missing or invalid.
+    """
+    apply_paper_style()
+    _validate_png_path(save_path)
+
+    if n_bins <= 0:
+        raise ValueError(f"n_bins must be positive, got {n_bins}")
+
+    required_true = {"beta", "gamma", "sigma_sq"}
+    missing_true = required_true.difference(true_params.keys())
+    if missing_true:
+        raise ValueError(f"true_params missing required keys: {missing_true}")
+
+    keys = [
+        ("beta_hat", "beta", r"$\hat{\beta}-\beta_0$"),
+        ("gamma_hat", "gamma", r"$\hat{\gamma}-\gamma_0$"),
+        ("sigma_sq_hat", "sigma_sq", r"$\hat{\sigma}^2-\sigma_0^2$"),
+    ]
+
+    errors: list[np.ndarray] = []
+    for hat_key, true_key, _ in keys:
+        vals: list[float] = []
+        for row in results:
+            if row.get("status") not in (None, "ok"):
+                continue
+            if hat_key not in row:
+                continue
+            estimate = float(row[hat_key])
+            if np.isfinite(estimate):
+                vals.append(estimate - float(true_params[true_key]))
+        if not vals:
+            raise ValueError(f"No finite values available for {hat_key}.")
+        errors.append(np.asarray(vals, dtype=np.float64))
+
+    fig, axes = plt.subplots(
+        3,
+        1,
+        figsize=figure_size("single", n_rows=3, n_cols=1),
+        constrained_layout=True,
+    )
+
+    for idx, (ax, (_, _, x_label), err_values) in enumerate(zip(axes, keys, errors, strict=True)):
+        _, _, patches = ax.hist(
+            err_values,
+            bins=n_bins,
+            facecolor="white",
+            edgecolor="black",
+            linewidth=0.6,
+        )
+        style_histogram_patches(list(patches), hatch_index=idx, facecolor="white")
+        add_reference_line(ax, value=0.0, text="0", axis="x")
+
+        mean_val = float(np.mean(err_values))
+        std_val = float(np.std(err_values, ddof=0))
+        n_obs = int(err_values.size)
+        ax.text(
+            0.98,
+            0.95,
+            f"mean={mean_val:+.4f}\nstd={std_val:.4f}\nn={n_obs}",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=9,
+            bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15},
+        )
+        ax.set_xlabel("Estimation error")
+        ax.set_ylabel("Count")
+        ax.set_title(x_label)
+        style_axes(ax)
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=FIGURE_DPI, format="png")
+    plt.close(fig)
+
+
+def plot_mc_quantile_convergence_paths(
+    histories: list[dict[str, np.ndarray]],
+    true_params: dict[str, float],
+    max_steps: int,
+    save_path: Path,
+    quantiles: tuple[float, ...] = (0.05, 0.25, 0.50, 0.75, 0.95),
+) -> None:
+    """Plot parameter trajectories with Monte Carlo quantile envelopes.
+
+    Args:
+        histories: Per-realization histories loaded from ``.npz`` files.
+        true_params: True values for ``beta``, ``gamma``, and ``sigma_sq``.
+        max_steps: Common padded horizon for plotted trajectories.
+        save_path: Output PNG path.
+        quantiles: Quantiles used to draw outer and inner envelopes.
+
+    Raises:
+        ValueError: If input histories are empty or malformed.
+    """
+    apply_paper_style()
+    _validate_png_path(save_path)
+    _validate_quantiles(quantiles)
+
+    if max_steps <= 0:
+        raise ValueError(f"max_steps must be positive, got {max_steps}")
+    if not histories:
+        raise ValueError("histories cannot be empty.")
+
+    required_true = {"beta", "gamma", "sigma_sq"}
+    missing_true = required_true.difference(true_params.keys())
+    if missing_true:
+        raise ValueError(f"true_params missing required keys: {missing_true}")
+
+    steps = np.arange(1, max_steps + 1, dtype=np.int32)
+    series = [
+        ("beta", r"$\beta$"),
+        ("gamma", r"$\gamma$"),
+        ("sigma_sq", r"$\sigma^2$"),
+    ]
+
+    fig, axes = plt.subplots(
+        3,
+        1,
+        figsize=figure_size("single", n_rows=3, n_cols=1),
+        sharex=True,
+        constrained_layout=True,
+    )
+
+    for ax, (key, ylabel) in zip(axes, series, strict=True):
+        stacked = np.stack(
+            [_pad_history(np.asarray(hist[key]), max_steps) for hist in histories],
+            axis=0,
+        )
+        q_lo, q_iqr_lo, q_med, q_iqr_hi, q_hi = np.quantile(
+            stacked,
+            q=np.asarray(quantiles, dtype=np.float64),
+            axis=0,
+        )
+
+        ax.fill_between(steps, q_lo, q_hi, color="0.7", alpha=0.15, linewidth=0.0)
+        ax.fill_between(steps, q_iqr_lo, q_iqr_hi, color="0.45", alpha=0.35, linewidth=0.0)
+        ax.plot(steps, q_med, **line_style(0, with_markers=False))
+        add_reference_line(ax, value=float(true_params[key]), text=f"true={true_params[key]:.3g}")
+        ax.set_ylabel(ylabel)
+        style_axes(ax)
+
+    axes[-1].set_xlabel("Generator Step")
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=FIGURE_DPI, format="png")
+    plt.close(fig)
+
+
+def plot_mc_quantile_loss_paths(
+    histories: list[dict[str, np.ndarray]],
+    max_steps: int,
+    save_path: Path,
+    smoothing_window: int = 30,
+    quantiles: tuple[float, ...] = (0.05, 0.25, 0.50, 0.75, 0.95),
+) -> None:
+    """Plot discriminator/generator loss quantile envelopes across realizations.
+
+    Args:
+        histories: Per-realization histories loaded from ``.npz`` files.
+        max_steps: Common padded horizon for plotted trajectories.
+        save_path: Output PNG path.
+        smoothing_window: Trailing rolling-average window applied before quantiles.
+        quantiles: Quantiles used to draw outer and inner envelopes.
+
+    Raises:
+        ValueError: If input histories are empty or malformed.
+    """
+    apply_paper_style()
+    _validate_png_path(save_path)
+    _validate_quantiles(quantiles)
+
+    if max_steps <= 0:
+        raise ValueError(f"max_steps must be positive, got {max_steps}")
+    if smoothing_window <= 0:
+        raise ValueError(f"smoothing_window must be positive, got {smoothing_window}")
+    if not histories:
+        raise ValueError("histories cannot be empty.")
+
+    steps = np.arange(1, max_steps + 1, dtype=np.int32)
+    loss_specs = [
+        ("loss_d", "(a) Discriminator Loss", OPTIMAL_DISC_LOSS, r"$2\log 2$"),
+        ("loss_g", "(b) Generator Loss", OPTIMAL_GEN_LOSS, r"$\log 2$"),
+    ]
+
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=figure_size("double", n_rows=1, n_cols=2),
+        constrained_layout=True,
+    )
+
+    for ax, (key, title, ref_val, ref_text) in zip(axes, loss_specs, strict=True):
+        stacked_raw = np.stack(
+            [_pad_history(np.asarray(hist[key]), max_steps) for hist in histories],
+            axis=0,
+        )
+        stacked_smooth = np.stack(
+            [_trailing_rolling_mean(row, window=smoothing_window) for row in stacked_raw],
+            axis=0,
+        )
+        q_lo, q_iqr_lo, q_med, q_iqr_hi, q_hi = np.quantile(
+            stacked_smooth,
+            q=np.asarray(quantiles, dtype=np.float64),
+            axis=0,
+        )
+
+        ax.fill_between(steps, q_lo, q_hi, color="0.7", alpha=0.15, linewidth=0.0)
+        ax.fill_between(steps, q_iqr_lo, q_iqr_hi, color="0.45", alpha=0.35, linewidth=0.0)
+        ax.plot(steps, q_med, **line_style(0, with_markers=False))
+        add_reference_line(ax, value=ref_val, text=ref_text)
+        ax.set_title(title)
+        ax.set_xlabel("Generator Step")
+        ax.set_ylabel("Loss")
+        style_axes(ax)
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=FIGURE_DPI, format="png")
