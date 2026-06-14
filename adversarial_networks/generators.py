@@ -3,7 +3,7 @@
 A *structural model* is simultaneously the economic object (a network game from
 agent preferences) and the GAN *generator* (it simulates equilibria ``Y^theta``).
 :class:`NetworkGameGenerator` is the abstract scaffold for **any** admissible game
-(see ``docs/design/EXTENDING.md``); a subclass writes only the economics —
+(see the ``experiments/custom_game_model.ipynb`` notebook); a subclass writes only the economics —
 the best response (or its FOC), and optionally the peer aggregate / shock draw /
 initial state — and the base owns the differentiable equilibrium solve, the
 iteration bookkeeping, input validation, and the device/dtype contracts.
@@ -344,7 +344,7 @@ class EffortGameGenerator(NetworkGameGenerator):
     ``mu``, ``r``, ``sigma^2`` are reparameterised; ``r`` and ``sigma^2`` are fixed by
     default (the finite-moment companion note's Lemma-2 regime).
 
-    Args mirror the original generator; see ``docs/design/PUBLIC_API.md``.
+    Args mirror the original generator.
     """
 
     def __init__(

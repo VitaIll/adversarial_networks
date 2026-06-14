@@ -16,11 +16,11 @@ dist/
 .ipynb_checkpoints/
 experiments/*.executed.ipynb
 
-# generated docs build output (Sphinx) — the hand-written docs/ tree IS tracked
-docs/_build/
-
-# legacy effort-game design doc: double-encoded mojibake + BOM, pending repair/salvage to docs/notes/
-/docs/effort_game_estimation_design.md
+# internal working artifacts — kept local, NOT published to the remote
+# (design/planning notes + AI agent-instruction files)
+/docs/
+/AGENTS.md
+/CLAUDE.md
 
 # run artifacts (large, regenerated)
 /artifacts/

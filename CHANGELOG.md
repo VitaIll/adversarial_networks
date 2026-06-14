@@ -11,10 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Licensing/packaging**: added a real `LICENSE` file (MIT) backing the `pyproject` declaration and ensured it
   ships in built distributions via `[tool.setuptools] license-files`; single-sourced the version through
   `[tool.setuptools.dynamic]` (no more dual `pyproject`/`__init__` literal).
-- **Repo structure**: the hand-written design docs under `docs/` are now tracked (the directory was previously
-  git-ignored wholesale, leaving the README's `docs/design/` links dead in a clone); added `CITATION.cff` and a
-  GitHub Actions CI workflow (`ruff` + `pytest`, CPU-only torch). The source-paper PDFs are kept out of version
-  control by decision (root `*.pdf` ignored).
+- **Repo structure**: kept internal working artifacts out of the published tree — the `docs/` design/planning
+  notes and the `AGENTS.md`/`CLAUDE.md` agent-instruction files are git-ignored (local only); removed the
+  now-dead `docs/design/` references from the README and package docstrings so the remote is self-consistent.
+  Added `CITATION.cff` and a GitHub Actions CI workflow (`ruff` + `pytest`, CPU-only torch). The source-paper
+  PDFs are kept out of version control by decision (root `*.pdf` ignored).
 - **Dependencies / reproducibility**: added the genuinely-used `pandas` (and `pytest-html`/`ruff`) to
   `environment.yml` and regenerated the conda lock; removed the mandatory `--html` from `pytest.ini addopts`
   (the HTML report is now opt-in) so a non-`[dev]` install can run `pytest`.
@@ -26,8 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Refactored the package into a **general framework** for adversarial structural
 estimation of network-equilibrium models, with a `scikit-learn` / `DoubleML`-style
-public API and a separated fast computational core. See `docs/design/` for the full
-design.
+public API and a separated fast computational core.
 
 - **Package rename** `src` → `adversarial_networks` (the distribution/repo name); added
   `[tool.setuptools.packages.find]`, `pandas`, and a `py.typed` marker.

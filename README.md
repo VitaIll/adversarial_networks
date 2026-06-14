@@ -90,10 +90,9 @@ class LinearInMeans(NetworkGameGenerator):
         return p["beta"] * peer_agg + (p["gamma"] * X + shocks)
 ```
 
-Estimate it with the **same** `AdversarialEstimator`. The full guide (closed-form vs
-FOC routes, AD-Newton + implicit differentiation, custom aggregates, `check_model`)
-is in [docs/design/EXTENDING.md](docs/design/EXTENDING.md); the
-`experiments/custom_game_model.ipynb` notebook is a from-scratch worked example.
+Estimate it with the **same** `AdversarialEstimator`. A full from-scratch worked
+example (closed-form vs FOC routes, AD-Newton + implicit differentiation, custom
+aggregates, `check_model`) is the `experiments/custom_game_model.ipynb` notebook.
 
 ## Public API
 
@@ -104,7 +103,7 @@ is in [docs/design/EXTENDING.md](docs/design/EXTENDING.md); the
 the built-in `LinearInMeansGenerator` / `EffortGameGenerator`, the `make_*` datasets,
 `recovery_table`, `MonteCarloRunner`, and the observability sinks. Advanced machinery
 (`ego.EgoSubstrate`, `sampling.RootSampler`, `losses`, `core.*`) lives in its
-submodule. Design docs: [docs/design/](docs/design/).
+submodule.
 
 ## Status & honesty notes
 
