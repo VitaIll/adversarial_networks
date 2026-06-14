@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "adversarial-networks"
 version = "0.1.0"
-description = "Adversarial structural estimation on a single network (linear-in-means MVP)"
+description = "A general framework for adversarial structural estimation of network-equilibrium models on a single graph"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
-    {name = "Research Team"}
+    {name = "Vít Illichmann"},
 ]
 license = {text = "MIT"}
 
@@ -19,6 +19,7 @@ dependencies = [
     "networkx>=3.0",
     "numpy>=1.24",
     "matplotlib>=3.7",
+    "pandas>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -28,18 +29,11 @@ dev = [
     "ruff>=0.1",
 ]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = [
-    "-v",
-    "--tb=short",
-    "--html=tests/reports/report.html",
-    "--self-contained-html",
-]
-filterwarnings = [
-    "ignore:`torch_geometric.distributed` has been deprecated:DeprecationWarning",
-    "ignore:`torch.jit.script` is deprecated:DeprecationWarning",
-]
+[tool.setuptools.packages.find]
+include = ["adversarial_networks*"]
+
+[tool.setuptools.package-data]
+adversarial_networks = ["py.typed"]
 
 [tool.ruff]
 line-length = 100
@@ -48,4 +42,7 @@ exclude = ["__pycache__", ".pytest_cache", "artifacts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP"]
-ignore = ["E501"]  # Line too long (handled by formatter)
+# E501: line length (handled by formatter). N8xx: the domain-math naming convention
+# (X covariates, Y outcomes, W interaction matrix, F = nn.functional) used throughout
+# the package and the source papers — intentional, not a style slip.
+ignore = ["E501", "N802", "N803", "N806", "N812"]

@@ -5,12 +5,12 @@ Provides reusable test fixtures for graphs, configurations, and common test data
 
 from __future__ import annotations
 
+import networkx as nx
 import pytest
 import torch
-import networkx as nx
-from torch_geometric.utils import from_networkx, to_undirected, k_hop_subgraph
+from torch_geometric.utils import from_networkx, k_hop_subgraph, to_undirected
 
-from src import build_row_stochastic_W
+from adversarial_networks.core.graph import row_stochastic_weights as build_row_stochastic_W
 
 
 @pytest.fixture

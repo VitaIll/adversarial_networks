@@ -30,15 +30,16 @@ import torch
 from torch import Tensor
 from torch_geometric.utils import k_hop_subgraph, to_undirected
 
-from .root_sampling import RootSampler, build_adjacency_from_edge_index, sample_roots_tensor
-from .utils import EgoCache, EgoCacheEntry, build_row_stochastic_W, extract_ego_batch
+from .core.ego_features import EgoCache, EgoCacheEntry, extract_ego_batch
+from .core.graph import adjacency_lists_from_edge_index, row_stochastic_weights
+from .sampling import RootSampler, sample_roots_tensor
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import networkx as nx
     from torch_geometric.data import Batch
 
-    from .root_sampling import RootSamplingResult
-    from .utils import InstanceNoiseConfigLike
+    from .core.types import InstanceNoiseConfigLike
+    from .sampling import RootSamplingResult
 
 
 class EgoSubstrate:
@@ -118,6 +119,9 @@ class EgoSubstrate:
         self.mu_X = float(mu_X)
         self.sigma_X = float(sigma_X)
         self.sanitization_report: dict[str, int] = {}
+        # Original-node positions kept after sanitisation (set by from_networkx);
+        # lets a caller (NetworkData) re-index an outcome vector identically to X.
+        self.kept_positions: Tensor | None = None
 
     # ------------------------------------------------------------------ factories
     @classmethod
@@ -162,7 +166,7 @@ class EgoSubstrate:
             edge_index = to_undirected(edge_index, num_nodes=num_nodes)
         edge_index = edge_index.contiguous()
 
-        W = build_row_stochastic_W(edge_index=edge_index, num_nodes=num_nodes)
+        W = row_stochastic_weights(edge_index=edge_index, num_nodes=num_nodes)
         ego_cache = cls._build_ego_cache(edge_index=edge_index, num_nodes=num_nodes, k=k, device=device)
         return cls(
             edge_index=edge_index,
@@ -176,7 +180,7 @@ class EgoSubstrate:
     @classmethod
     def from_networkx(
         cls,
-        graph: "nx.Graph",
+        graph: nx.Graph,
         X: Tensor,
         *,
         k: int,
@@ -253,7 +257,7 @@ class EgoSubstrate:
         edge_tensor = torch.tensor(edge_pairs, dtype=torch.long, device=X.device).t().contiguous()
         edge_index = to_undirected(edge_tensor, num_nodes=num_nodes).contiguous()
 
-        adjacency = build_adjacency_from_edge_index(edge_index=edge_index.cpu(), num_nodes=num_nodes)
+        adjacency = adjacency_lists_from_edge_index(edge_index=edge_index.cpu(), num_nodes=num_nodes)
         import numpy as np
 
         sampler = RootSampler(
@@ -275,6 +279,7 @@ class EgoSubstrate:
             "nodes_dropped": int(n_before - num_nodes),
             "num_nodes": int(num_nodes),
         }
+        substrate.kept_positions = keep_positions
         return substrate
 
     @staticmethod
@@ -298,7 +303,7 @@ class EgoSubstrate:
         return ego_cache
 
     # ------------------------------------------------------------------- batching
-    def sample_roots(self, batch_size: int) -> tuple[Tensor, "RootSamplingResult"]:
+    def sample_roots(self, batch_size: int) -> tuple[Tensor, RootSamplingResult]:
         """Sample a batch of root node ids on this substrate's device.
 
         Args:
@@ -346,8 +351,8 @@ class EgoSubstrate:
         *,
         step: int,
         role: str,
-        instance_noise: "InstanceNoiseConfigLike | None" = None,
-    ) -> tuple["Batch", Tensor]:
+        instance_noise: InstanceNoiseConfigLike | None = None,
+    ) -> tuple[Batch, Tensor]:
         """Construct a rooted-ego PyG batch for the given roots and outcomes.
 
         Thin, validated wrapper over :func:`~src.utils.extract_ego_batch` binding

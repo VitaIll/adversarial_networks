@@ -10,15 +10,21 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.utils import from_networkx, k_hop_subgraph, to_undirected
 
-from src import RootedMPNNDiscriminator, SCMGenerator, build_row_stochastic_W, extract_ego_batch
-from src.root_sampling import (
-    RootSampler,
-    build_adjacency_from_edge_index,
+from adversarial_networks import RootedMPNNDiscriminator
+from adversarial_networks.core.ego_features import extract_ego_batch
+from adversarial_networks.core.graph import (
+    adjacency_lists_from_edge_index as build_adjacency_from_edge_index,
+)
+from adversarial_networks.core.graph import (
+    row_stochastic_weights as build_row_stochastic_W,
+)
+from adversarial_networks.core.neighborhoods import (
     greedy_pack_best_from_permutations,
     greedy_pack_once_from_permutation,
     precompute_balls,
-    sample_roots_tensor,
 )
+from adversarial_networks.generators import LinearInMeansGenerator as SCMGenerator
+from adversarial_networks.sampling import RootSampler, sample_roots_tensor
 
 
 def _edge_index_from_graph(graph: nx.Graph) -> torch.Tensor:

@@ -1,130 +1,133 @@
-"""End-to-end tests for the AdversarialEstimator engine.
+"""Tests for the sklearn/DoubleML-shaped AdversarialEstimator.
 
-These exercise a small but complete estimation run: build a substrate, simulate an
-observed outcome from a known model, then fit a fresh model + discriminator. They
-verify the typed result surface, observability collection, that the structural
-parameters actually move (gradient flows through the unrolled solve), and that the
-milestone-2 gradient-transform seam is invoked with diagnostics propagated to the
-step metrics.
+Exercise the public estimator contract: ``fit(data) -> self`` with trailing-
+underscore learned attributes, ``NotFittedError`` before fit, clone-safety (the
+ctor modules stay pristine), the ``estimates_`` table, that the structural
+parameters move (gradient flows through the unrolled solve), the
+``MinimaxStepContext`` gradient-transform seam, the receptive-field guard, and the
+non-convergence warning.
 """
 
 from __future__ import annotations
 
 import math
+import warnings
 
-import networkx as nx
-import numpy as np
+import pandas as pd
 import pytest
 import torch
 
-from src.contracts import EstimationResult, StepMetrics
-from src.discriminator import RootedMPNNDiscriminator
-from src.ego import EgoSubstrate
-from src.estimator import AdversarialEstimator
-from src.estimator_config import EstimatorConfig
-from src.generator import SCMGenerator
-from src.observability import InMemoryHistory
+import adversarial_networks as an
+from adversarial_networks.contracts import EstimationResult
+from adversarial_networks.discriminator import RootedMPNNDiscriminator
+from adversarial_networks.estimator import (
+    AdversarialEstimator,
+    ConvergenceWarning,
+    MinimaxStepContext,
+    NotFittedError,
+)
+from adversarial_networks.estimator_config import EstimatorConfig
+from adversarial_networks.generators import LinearInMeansGenerator
 
 
-def _build_substrate(n: int = 40, k: int = 2, seed: int = 0) -> EgoSubstrate:
-    graph = nx.barabasi_albert_graph(n=n, m=2, seed=seed)
-    torch.manual_seed(seed)
-    X = torch.randn(graph.number_of_nodes())
-    return EgoSubstrate.from_networkx(graph, X, k=k, root_sampler_mode="uniform", seed=seed)
+def _data(n: int = 120, seed: int = 0) -> an.NetworkData:
+    return an.make_linear_in_means(n_nodes=n, graph="ba", k=2, seed=seed, m=2)
 
 
-def _true_outcome(substrate: EgoSubstrate, *, beta_cap: float = 0.85) -> torch.Tensor:
-    torch.manual_seed(123)
-    true_model = SCMGenerator(
-        beta_cap=beta_cap, picard_tol=1e-6, picard_max=50,
-        init_beta=0.4, init_gamma=1.5, init_log_sigma_sq=0.0,
-    )
-    with torch.no_grad():
-        return true_model(substrate.W, substrate.X)
-
-
-def _fresh_pair(beta_cap: float = 0.85, hidden_dim: int = 8, k: int = 2):
-    model = SCMGenerator(
-        beta_cap=beta_cap, picard_tol=1e-6, picard_max=50,
-        init_beta=0.0, init_gamma=0.0, init_log_sigma_sq=0.0,
-    )
+def _pair(hidden_dim: int = 8, k: int = 2):
+    model = LinearInMeansGenerator(beta_cap=0.85, init_beta=0.0, init_gamma=0.0)
     disc = RootedMPNNDiscriminator(hidden_dim=hidden_dim, num_layers=k, logit_clip=10.0)
     return model, disc
 
 
 def _small_config(max_steps: int = 15) -> EstimatorConfig:
     return EstimatorConfig(
-        max_steps=max_steps, min_steps=0, batch_size=8, n_disc=1,
-        lr_d=1e-3, lr_g=5e-3, grad_clip_norm=10.0,
-        convergence_window=100, stability_window=30, seed=7,
+        max_steps=max_steps, min_steps=0, batch_size=8, n_disc=1, lr_d=1e-3, lr_g=5e-3,
+        grad_clip_norm=10.0, convergence_window=100, stability_window=30, seed=7,
     )
 
 
-def test_fit_returns_ok_result_with_model_param_keys() -> None:
-    substrate = _build_substrate()
-    Y_obs = _true_outcome(substrate)
-    model, disc = _fresh_pair()
-    history = InMemoryHistory()
-    est = AdversarialEstimator(
-        model=model, discriminator=disc, substrate=substrate, Y_obs=Y_obs,
-        config=_small_config(15), observers=[history],
-    )
-    result = est.fit()
-
-    assert isinstance(result, EstimationResult)
-    assert result.status == "ok"
-    assert result.ok
-    assert result.n_steps_run == 15
-    assert set(result.params.keys()) == {"beta", "gamma", "sigma_sq"}
-    assert all(math.isfinite(v) for v in result.params.values())
-    assert len(history) == 15
-    assert set(history.params.keys()) == {"beta", "gamma", "sigma_sq"}
-    assert history.result is result
+def test_fit_returns_self_with_learned_attrs() -> None:
+    data = _data()
+    model, disc = _pair()
+    est = AdversarialEstimator(model, disc, config=_small_config(12))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        returned = est.fit(data)
+    assert returned is est
+    assert isinstance(est.result_, EstimationResult)
+    assert est.result_.status == "ok"
+    assert est.n_iter_ == 12
+    assert set(est.params_.keys()) == {"beta", "gamma", "sigma_sq"}
+    assert est.feature_names_ == ["beta", "gamma", "sigma_sq"]
+    assert all(math.isfinite(v) for v in est.params_.values())
+    assert len(est.history_) == 12
 
 
-def test_fit_moves_structural_parameters() -> None:
-    """Gradient must flow through the unrolled Picard solve and move the params."""
-    substrate = _build_substrate(seed=1)
-    Y_obs = _true_outcome(substrate)
-    model, disc = _fresh_pair()
+def test_not_fitted_error_before_fit() -> None:
+    model, disc = _pair()
+    est = AdversarialEstimator(model, disc, config=_small_config(3))
+    for attr in ("params_", "model_", "result_", "converged_", "estimates_"):
+        with pytest.raises(NotFittedError):
+            getattr(est, attr)
+
+
+def test_clone_safety_ctor_modules_untouched() -> None:
+    data = _data(seed=1)
+    model, disc = _pair()
     before = model.get_params()
-    est = AdversarialEstimator(
-        model=model, discriminator=disc, substrate=substrate, Y_obs=Y_obs,
-        config=_small_config(20),
-    )
-    est.fit()
-    after = model.get_params()
-    moved = max(abs(after[name] - before[name]) for name in before)
-    assert moved > 1e-4, f"parameters did not move (max change {moved})"
+    est = AdversarialEstimator(model, disc, config=_small_config(15))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        est.fit(data)
+    assert est.model_ is not model
+    assert est.discriminator_ is not disc
+    moved = max(abs(est.params_[k] - before[k]) for k in before)
+    assert moved > 1e-4, f"learned params did not move ({moved})"
+    assert model.get_params() == before  # ctor model pristine (no warm-start)
 
 
-def test_losses_are_finite_and_positive() -> None:
-    substrate = _build_substrate(seed=2)
-    Y_obs = _true_outcome(substrate)
-    model, disc = _fresh_pair()
-    history = InMemoryHistory()
-    est = AdversarialEstimator(
-        model=model, discriminator=disc, substrate=substrate, Y_obs=Y_obs,
-        config=_small_config(12), observers=[history],
-    )
-    est.fit()
-    assert all(math.isfinite(v) and v > 0.0 for v in history.loss_d)
-    assert all(math.isfinite(v) and v > 0.0 for v in history.loss_g)
+def test_estimates_table_shape_and_columns() -> None:
+    data = _data(seed=2)
+    model, disc = _pair()
+    est = AdversarialEstimator(model, disc, config=_small_config(12))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        est.fit(data)
+    table = est.estimates_
+    assert isinstance(table, pd.DataFrame)
+    assert list(table.columns) == ["coef", "final", "path_sd"]
+    assert list(table.index) == ["beta", "gamma", "sigma_sq"]
+    assert (table["path_sd"] >= 0).all()
 
 
-def test_gradient_transform_seam_is_invoked_and_extras_propagate() -> None:
-    substrate = _build_substrate(seed=3)
-    Y_obs = _true_outcome(substrate)
-    model, disc = _fresh_pair()
+def test_losses_finite_and_positive() -> None:
+    data = _data(seed=3)
+    model, disc = _pair()
+    est = AdversarialEstimator(model, disc, config=_small_config(10))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        est.fit(data)
+    assert all(math.isfinite(v) and v > 0.0 for v in est.history_.loss_d)
+    assert all(math.isfinite(v) and v > 0.0 for v in est.history_.loss_g)
 
-    seen_steps: list[int] = []
 
-    def transform(estimator: AdversarialEstimator, step: int):
-        # The seam must expose the estimation state the M2 preconditioner needs.
-        assert estimator.model is model
-        assert estimator.W is substrate.W
-        seen_steps.append(step)
-        return {"probe": 1.0}
+def test_gradient_transform_seam_receives_context_and_extras_propagate() -> None:
+    from adversarial_networks.contracts import StepMetrics
+    from adversarial_networks.observability import InMemoryHistory
+
+    data = _data(seed=4)
+    model, disc = _pair()
+    seen: list[int] = []
+
+    def transform(context: MinimaxStepContext):
+        assert isinstance(context, MinimaxStepContext)
+        assert context.W is context.substrate.W
+        assert context.X is context.substrate.X
+        assert context.Y_obs.shape[0] == context.substrate.num_nodes
+        assert "sigma_X" in context.norm_stats
+        seen.append(context.step)
+        return {"probe": 2.0}
 
     captured: list[StepMetrics] = []
 
@@ -134,34 +137,71 @@ def test_gradient_transform_seam_is_invoked_and_extras_propagate() -> None:
             captured.append(metrics)
 
     est = AdversarialEstimator(
-        model=model, discriminator=disc, substrate=substrate, Y_obs=Y_obs,
-        config=_small_config(8), observers=[_Capture()], gradient_transform=transform,
+        model, disc, config=_small_config(8), gradient_transform=transform, observers=[_Capture()]
     )
-    result = est.fit()
-    assert seen_steps == list(range(1, result.n_steps_run + 1))
-    assert all(m.extras.get("probe") == 1.0 for m in captured)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        est.fit(data)
+    assert seen == list(range(1, est.n_iter_ + 1))
+    assert all(m.extras.get("probe") == 2.0 for m in captured)
 
 
-def test_estimator_rejects_non_conforming_model() -> None:
-    substrate = _build_substrate(seed=4)
-    Y_obs = _true_outcome(substrate)
-    _, disc = _fresh_pair()
+def test_receptive_field_guard_rejects_shallow_discriminator() -> None:
+    data = _data(seed=5)  # k = 2
+    model = LinearInMeansGenerator(beta_cap=0.85)
+    disc = RootedMPNNDiscriminator(hidden_dim=8, num_layers=1)  # < k
+    est = AdversarialEstimator(model, disc, config=_small_config(3))
+    with pytest.raises(ValueError, match="num_layers"):
+        est.fit(data)
 
-    class NotAModel(torch.nn.Module):
-        pass
 
+def test_fit_rejects_non_networkdata() -> None:
+    model, disc = _pair()
+    est = AdversarialEstimator(model, disc, config=_small_config(3))
     with pytest.raises(TypeError):
-        AdversarialEstimator(
-            model=NotAModel(), discriminator=disc, substrate=substrate,  # type: ignore[arg-type]
-            Y_obs=Y_obs, config=_small_config(3),
-        )
+        est.fit(object())  # type: ignore[arg-type]
 
 
-def test_estimator_rejects_wrong_length_outcome() -> None:
-    substrate = _build_substrate(seed=5)
-    model, disc = _fresh_pair()
-    with pytest.raises(ValueError):
-        AdversarialEstimator(
-            model=model, discriminator=disc, substrate=substrate,
-            Y_obs=torch.randn(substrate.num_nodes + 3), config=_small_config(3),
-        )
+def test_shortcut_kwargs_override_config() -> None:
+    data = _data(seed=6)
+    model, disc = _pair()
+    est = AdversarialEstimator(model, disc, config=_small_config(50), max_steps=5, seed=11)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        est.fit(data)
+    assert est.n_iter_ == 5  # the max_steps shortcut won over the config's 50
+
+
+def test_non_convergence_warns() -> None:
+    data = _data(seed=7)
+    model, disc = _pair()
+    est = AdversarialEstimator(model, disc, config=_small_config(6))
+    with pytest.warns(ConvergenceWarning):
+        est.fit(data)
+    assert est.converged_ is False
+
+
+def test_simulate_and_discriminator_scores() -> None:
+    data = _data(seed=8)
+    model, disc = _pair()
+    est = AdversarialEstimator(model, disc, config=_small_config(8))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        est.fit(data)
+    y_sim = est.simulate(seed=1)
+    assert y_sim.shape == (data.num_nodes,)
+    real, fake = est.discriminator_scores(n_roots=32)
+    assert real.numel() == 32 and fake.numel() == 32
+    assert torch.all((real >= 0) & (real <= 1)) and torch.all((fake >= 0) & (fake <= 1))
+
+
+def test_recovery_table_against_truth() -> None:
+    data = _data(seed=9)
+    model, disc = _pair()
+    est = AdversarialEstimator(model, disc, config=_small_config(8))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        est.fit(data)
+    table = est.recovery_table({"beta": 0.4, "gamma": 1.5, "sigma_sq": 1.0})
+    assert list(table.columns) == ["coef", "true", "abs_err", "path_sd"]
+    assert table.loc["beta", "true"] == 0.4

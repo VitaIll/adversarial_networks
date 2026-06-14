@@ -12,13 +12,11 @@ import networkx as nx
 import torch
 from torch_geometric.utils import from_networkx, k_hop_subgraph, to_undirected
 
-from src import (
-    SCMGenerator,
-    InstanceNoiseConfig,
-    build_row_stochastic_W,
-    compute_instance_noise_taus,
-    extract_ego_batch,
-)
+from adversarial_networks.config import InstanceNoiseConfig
+from adversarial_networks.core.ego_features import extract_ego_batch
+from adversarial_networks.core.graph import row_stochastic_weights as build_row_stochastic_W
+from adversarial_networks.core.objective import instance_noise_taus as compute_instance_noise_taus
+from adversarial_networks.generators import LinearInMeansGenerator as SCMGenerator
 
 
 def _path_graph_edge_index(num_nodes: int) -> torch.Tensor:

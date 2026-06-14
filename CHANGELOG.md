@@ -7,7 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Changed — general-framework refactor
+
+Refactored the package into a **general framework** for adversarial structural
+estimation of network-equilibrium models, with a `scikit-learn` / `DoubleML`-style
+public API and a separated fast computational core. See `docs/design/` for the full
+design.
+
+- **Package rename** `src` → `adversarial_networks` (the distribution/repo name); added
+  `[tool.setuptools.packages.find]`, `pandas`, and a `py.typed` marker.
+- **Fast computational core** `adversarial_networks/core/`: `equilibrium` (`picard`,
+  `newton` with analytic/AD-diagonal Jacobian, `solve_equilibrium` with
+  `unroll`/`implicit` differentiation), `graph`, `neighborhoods`, `objective` (losses +
+  convergence + instance-noise), `ego_features` (the single PyG seam), `types`. Kernels
+  are `torch_geometric`-free and unit-tested in isolation.
+- **Framework layer**: `NetworkGameGenerator` base (subclass with `best_response` xor
+  `foc_residual` + optional `peer_aggregate`/`sample_shocks`/`initial_state`); declarative
+  `transforms` (`Real`/`Positive`/`Interval`); `check_model`/`ModelReport` admissibility
+  surface (operator-∞-norm contraction, locality, shock monotonicity, uniqueness,
+  residual, gradient flow). `SCMGenerator` renamed `LinearInMeansGenerator`; the effort
+  game refactored onto the base — both **numeric-equivalence guarded** (forward
+  bit-identical, gradients `allclose`).
+- **Data & estimator**: `NetworkData` (mandatory outcome, validate-before-assign,
+  finite/float32 contract); `datasets.make_linear_in_means` / `make_effort_game`;
+  `reporting.recovery_table`; a single sklearn-shaped `AdversarialEstimator` with
+  `fit(data) -> self`, trailing-underscore learned attributes, `estimates_`,
+  `NotFittedError`, clone-safety, receptive-field guard, and the `MinimaxStepContext`
+  gradient-transform seam (future Fisher / standard-error milestone). The verified loop
+  is the free function `_run_minimax`, shared by `fit` and `MonteCarloRunner`.
+- **Curated public surface**: ~24 framework-first names; advanced machinery
+  (`EgoSubstrate`, `RootSampler`, `losses`, `core.*`) reachable from its submodule.
+- **`io_utils`** generality fix: deleted the dead `save_realization_history`; the loader
+  now coerces CSV columns by suffix (model-agnostic, not hard-coded `beta/gamma/sigma_sq`).
+- Rewrote the two built-in notebooks and added a from-scratch custom-game notebook;
+  rewrote/extended the test suite (core equivalence, framework, `check_model` soundness,
+  AD-vs-analytic and unroll-vs-implicit gradients, data/datasets/reporting, clone-safety).
+
+### Changed — earlier (pre-framework)
 - **Module refactoring**: Split GAN component classes into dedicated modules for better organization:
   - Created `src/generator.py` containing `SCMGenerator` with comprehensive documentation on the structural causal model, Picard iteration, and parameter reparameterization
   - Created `src/discriminator.py` containing `RootedMPNNDiscriminator` with detailed documentation on GIN architecture, root-aware message passing, and design rationale

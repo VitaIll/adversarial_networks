@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 import torch
 
-from src.ego import EgoSubstrate
-from src.root_sampling import RootSampler
+from adversarial_networks.ego import EgoSubstrate
+from adversarial_networks.sampling import RootSampler
 
 
 def _path_edge_index(n: int) -> torch.Tensor:

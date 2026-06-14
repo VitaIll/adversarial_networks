@@ -22,9 +22,9 @@ the estimation.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Mapping, Sequence
 
 from .contracts import EstimationResult, MetricsObserver, StepMetrics
 
@@ -78,7 +78,7 @@ class InMemoryHistory(MetricsObserver):
         """Return a shallow copy of the per-parameter value paths."""
         return {name: list(path) for name, path in self.params.items()}
 
-    def as_arrays(self) -> dict[str, "object"]:
+    def as_arrays(self) -> dict[str, object]:
         """Flatten the history into a mapping of 1-D float arrays.
 
         Keys are the model's parameter names plus ``loss_d``, ``loss_g``,

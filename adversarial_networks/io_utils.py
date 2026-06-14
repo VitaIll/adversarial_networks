@@ -13,8 +13,6 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 
 def write_csv_table(
     path: Path,
@@ -149,29 +147,25 @@ def load_completed_realizations(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
 
-    type_map: dict[str, type] = {
-        "realization": int,
-        "final_step": int,
-        "beta_hat": float,
-        "gamma_hat": float,
-        "sigma_sq_hat": float,
-        "beta_final": float,
-        "gamma_final": float,
-        "sigma_sq_final": float,
-        "loss_d_final": float,
-        "loss_g_final": float,
-        "loss_d_rolling_final": float,
-        "loss_g_rolling_final": float,
-        "init_seed": int,
-        "init_beta": float,
-        "init_gamma": float,
-        "init_log_sigma_sq": float,
-        "gt_seed": int,
-        "train_seed": int,
-        "elapsed_seconds": float,
-    }
     true_tokens = {"1", "true", "t", "yes", "y"}
     false_tokens = {"0", "false", "f", "no", "n"}
+    int_columns = {"realization", "final_step"}
+    float_columns = {"loss_d_rolling_final", "loss_g_rolling_final", "elapsed_seconds"}
+
+    def _coerce(key: str, value_str: str) -> Any:
+        """Coerce by *column suffix*, so any model's parameter columns are typed.
+
+        Model-agnostic: a runner over the effort or a custom game writes columns like
+        ``lambda__hat`` / ``mu_final`` / ``r_init`` which must parse as floats, not be
+        left as strings (the old hard-coded ``beta/gamma/sigma_sq`` map left them as
+        strings). Seeds and step indices are integers; every ``*_hat``/``*_final``/
+        ``*_init`` parameter column is a float.
+        """
+        if key in int_columns or key.endswith("_seed"):
+            return int(value_str)
+        if key in float_columns or key.endswith(("_hat", "_final", "_init")):
+            return float(value_str)
+        return value_str  # status and any unrecognised column stay as strings
 
     rows: list[dict[str, Any]] = []
     try:
@@ -206,13 +200,8 @@ def load_completed_realizations(path: Path) -> list[dict[str, Any]]:
                             break
                         continue
 
-                    caster = type_map.get(key)
-                    if caster is None:
-                        parsed[key] = value
-                        continue
-
                     try:
-                        parsed[key] = caster(value_str)
+                        parsed[key] = _coerce(key, value_str)
                     except (TypeError, ValueError):
                         warnings.warn(
                             f"Skipping malformed row {row_idx}: cannot parse {key}={value_str!r}.",
@@ -233,23 +222,3 @@ def load_completed_realizations(path: Path) -> list[dict[str, Any]]:
         return []
 
     return rows
-
-
-def save_realization_history(path: Path, history: dict[str, list[float]]) -> None:
-    """Save one realization training history as compressed float32 arrays.
-
-    Args:
-        path: Output ``.npz`` path.
-        history: Per-step history lists keyed by metric name.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        path,
-        beta=np.asarray(history.get("beta", []), dtype=np.float32),
-        gamma=np.asarray(history.get("gamma", []), dtype=np.float32),
-        sigma_sq=np.asarray(history.get("sigma_sq", []), dtype=np.float32),
-        loss_d=np.asarray(history.get("loss_d", []), dtype=np.float32),
-        loss_g=np.asarray(history.get("loss_g", []), dtype=np.float32),
-        tau_x=np.asarray(history.get("tau_x", []), dtype=np.float32),
-        tau_y=np.asarray(history.get("tau_y", []), dtype=np.float32),
-    )

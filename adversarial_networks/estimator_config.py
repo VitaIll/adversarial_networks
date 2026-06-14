@@ -16,7 +16,7 @@ notebooks reuse their current configuration objects unchanged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -53,6 +53,10 @@ class EstimatorConfig:
             ``((name, tol), ...)`` (e.g. a looser band for ``sigma_sq``).
         nonsaturating: Use the non-saturating structural loss (eq. 4.2) if true,
             else the saturating minimax form.
+        differentiation: Structural-gradient strategy applied to the model during
+            ``fit`` — ``"unroll"`` (autograd through the executed Picard) or
+            ``"implicit"`` (the implicit-function-theorem adjoint). ``None`` keeps
+            whatever the model was constructed with (default ``"unroll"``).
         seed: Optional seed; when set, the estimator reseeds the torch RNG and the
             substrate's sampler RNG at the start of ``fit`` for reproducibility.
     """
@@ -75,6 +79,7 @@ class EstimatorConfig:
     stability_range_tol: float = 0.01
     stability_range_tol_overrides: tuple[tuple[str, float], ...] = ()
     nonsaturating: bool = True
+    differentiation: str | None = None
     seed: int | None = None
 
     def __post_init__(self) -> None:
@@ -117,6 +122,11 @@ class EstimatorConfig:
         for name, tol in self.stability_range_tol_overrides:
             if tol <= 0.0:
                 raise ValueError(f"stability override for {name!r} must be positive, got {tol}")
+        if self.differentiation not in (None, "unroll", "implicit"):
+            raise ValueError(
+                "differentiation must be None, 'unroll', or 'implicit', got "
+                f"{self.differentiation!r}"
+            )
 
     def override_tol_for(self, param_name: str) -> float:
         """Return the stability range tolerance for a named parameter."""
@@ -126,10 +136,49 @@ class EstimatorConfig:
         return float(self.stability_range_tol)
 
     @classmethod
+    def recovery_default(cls) -> EstimatorConfig:
+        """The calibrated fast-scale config that recovers parameters at ~10k BA.
+
+        Calibrated against the linear-in-means recovery study (10k Barabasi-Albert,
+        ``beta_cap=0.85``, discriminator ``hidden_dim=12``/``logit_clip=4.0``/``num_layers=2``)
+        over multiple seeds. **The recovery recipe also needs the instance-noise blur**
+        — pair this config with
+        ``InstanceNoiseConfig(enabled=True, tau_x0=1.0, tau_y0=1.0, schedule="linear", anneal_steps=2000)``:
+        the slow (2000-step) blur anneal keeps the discriminator from sharpening while
+        the ``max_steps=1200`` horizon stops before the late-training overshoot, so the
+        tail-averaged estimate sits near the truth. Recovery is rough at this fast scale
+        (``beta`` — the social multiplier — is biased low; ``sigma^2`` is biased at finite
+        ``n`` and is not asserted); the asymptotic (paper-scale) regime recovers tightly.
+        The recovery test asserts ``beta``/``gamma`` within the observed spread.
+        """
+        return cls(
+            max_steps=1200,
+            min_steps=700,
+            batch_size=17,
+            n_disc=1,
+            lr_d=2e-4,
+            lr_g=3e-3,
+            grad_clip_norm=10.0,
+            lr_g_decay_steps=(220, 420, 620, 780),
+            lr_g_decay_factor=1.0,
+            convergence_window=100,
+            convergence_delta_d=0.01,
+            convergence_delta_g=0.01,
+            convergence_std_d_max=0.1,
+            convergence_std_g_max=0.1,
+            stability_window=30,
+            stability_range_tol=0.01,
+            stability_range_tol_overrides=(("gamma", 0.01), ("sigma_sq", 0.1), ("mu", 0.05)),
+            nonsaturating=True,
+            differentiation=None,
+            seed=0,
+        )
+
+    @classmethod
     def from_configs(
         cls,
-        experiment: "ExperimentConfig",
-        monte_carlo: "MonteCarloConfig",
+        experiment: ExperimentConfig,
+        monte_carlo: MonteCarloConfig,
         *,
         seed: int | None = None,
     ) -> EstimatorConfig:

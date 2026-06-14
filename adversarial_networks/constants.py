@@ -5,8 +5,6 @@ All magic numbers are defined here for maintainability and clarity.
 
 from __future__ import annotations
 
-import math
-
 # ─── Numerical Tolerances ───
 DEFAULT_PICARD_TOL = 1e-6
 """Default convergence tolerance for Picard iteration."""
@@ -29,11 +27,10 @@ ROLLING_WINDOW_SIZE = 120
 """Window size for rolling mean smoothing of loss curves."""
 
 # ─── GAN Equilibrium Targets ───
-OPTIMAL_DISC_LOSS = 2.0 * math.log(2.0)
-"""Theoretical optimal discriminator loss at Nash equilibrium ≈ 1.386."""
-
-OPTIMAL_GEN_LOSS = math.log(2.0)
-"""Theoretical optimal generator loss at Nash equilibrium ≈ 0.693."""
+# Canonical in core.objective; re-imported here so the workflow layer (plots,
+# diagnostics) shares one definition with no import cycle (core never imports up).
+from .core.objective import OPTIMAL_DISC_LOSS as OPTIMAL_DISC_LOSS  # noqa: E402
+from .core.objective import OPTIMAL_GEN_LOSS as OPTIMAL_GEN_LOSS  # noqa: E402
 
 # ─── File Extensions ───
 FIGURE_EXTENSION = ".png"

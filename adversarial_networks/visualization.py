@@ -6,8 +6,8 @@ and diagnostic figures.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -432,19 +432,37 @@ def _trailing_rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
     return out
 
 
+_PARAM_SYMBOLS = {
+    "beta": r"\beta", "gamma": r"\gamma", "sigma_sq": r"\sigma^2",
+    "lambda_": r"\lambda", "mu": r"\mu", "r": "r", "alpha": r"\alpha",
+}
+
+
+def _error_label(name: str) -> str:
+    """A monochrome error-axis label ``\\hat{sym} - sym_0`` for a parameter name."""
+    sym = _PARAM_SYMBOLS.get(name)
+    if sym is None:
+        return f"{name} error"
+    return rf"$\hat{{{sym}}}-{sym}_0$"
+
+
 def plot_mc_parameter_distributions(
     results: list[dict],
     true_params: dict[str, float],
     save_path: Path,
     n_bins: int = 25,
+    series: Sequence[str] | None = None,
 ) -> None:
     """Plot histograms of parameter estimation errors across MC realizations.
 
     Args:
         results: Per-realization result rows with ``*_hat`` entries.
-        true_params: True values for ``beta``, ``gamma``, and ``sigma_sq``.
+        true_params: True parameter values, keyed by name.
         save_path: Output path for the PNG figure.
         n_bins: Histogram bin count.
+        series: Parameter names to plot (default: the keys of ``true_params``) —
+            model-agnostic, so the effort game or a custom game's parameters plot
+            without code changes.
 
     Raises:
         ValueError: If required values are missing or invalid.
@@ -455,16 +473,12 @@ def plot_mc_parameter_distributions(
     if n_bins <= 0:
         raise ValueError(f"n_bins must be positive, got {n_bins}")
 
-    required_true = {"beta", "gamma", "sigma_sq"}
-    missing_true = required_true.difference(true_params.keys())
+    names = list(series) if series is not None else list(true_params.keys())
+    missing_true = set(names).difference(true_params.keys())
     if missing_true:
-        raise ValueError(f"true_params missing required keys: {missing_true}")
+        raise ValueError(f"true_params missing required keys: {sorted(missing_true)}")
 
-    keys = [
-        ("beta_hat", "beta", r"$\hat{\beta}-\beta_0$"),
-        ("gamma_hat", "gamma", r"$\hat{\gamma}-\gamma_0$"),
-        ("sigma_sq_hat", "sigma_sq", r"$\hat{\sigma}^2-\sigma_0^2$"),
-    ]
+    keys = [(f"{name}_hat", name, _error_label(name)) for name in names]
 
     errors: list[np.ndarray] = []
     for hat_key, true_key, _ in keys:
@@ -482,11 +496,13 @@ def plot_mc_parameter_distributions(
         errors.append(np.asarray(vals, dtype=np.float64))
 
     fig, axes = plt.subplots(
-        3,
+        len(names),
         1,
-        figsize=figure_size("single", n_rows=3, n_cols=1),
+        figsize=figure_size("single", n_rows=len(names), n_cols=1),
         constrained_layout=True,
+        squeeze=False,
     )
+    axes = axes[:, 0]
 
     for idx, (ax, (_, _, x_label), err_values) in enumerate(zip(axes, keys, errors, strict=True)):
         _, _, patches = ax.hist(
@@ -528,6 +544,7 @@ def plot_mc_quantile_convergence_paths(
     max_steps: int,
     save_path: Path,
     quantiles: tuple[float, ...] = (0.05, 0.25, 0.50, 0.75, 0.95),
+    series: Sequence[str] | None = None,
 ) -> None:
     """Plot parameter trajectories with Monte Carlo quantile envelopes.
 
@@ -550,27 +567,25 @@ def plot_mc_quantile_convergence_paths(
     if not histories:
         raise ValueError("histories cannot be empty.")
 
-    required_true = {"beta", "gamma", "sigma_sq"}
-    missing_true = required_true.difference(true_params.keys())
+    names = list(series) if series is not None else list(true_params.keys())
+    missing_true = set(names).difference(true_params.keys())
     if missing_true:
-        raise ValueError(f"true_params missing required keys: {missing_true}")
+        raise ValueError(f"true_params missing required keys: {sorted(missing_true)}")
 
     steps = np.arange(1, max_steps + 1, dtype=np.int32)
-    series = [
-        ("beta", r"$\beta$"),
-        ("gamma", r"$\gamma$"),
-        ("sigma_sq", r"$\sigma^2$"),
-    ]
+    panels = [(name, f"${_PARAM_SYMBOLS.get(name, name)}$") for name in names]
 
     fig, axes = plt.subplots(
-        3,
+        len(panels),
         1,
-        figsize=figure_size("single", n_rows=3, n_cols=1),
+        figsize=figure_size("single", n_rows=len(panels), n_cols=1),
         sharex=True,
         constrained_layout=True,
+        squeeze=False,
     )
+    axes = axes[:, 0]
 
-    for ax, (key, ylabel) in zip(axes, series, strict=True):
+    for ax, (key, ylabel) in zip(axes, panels, strict=True):
         stacked = np.stack(
             [_pad_history(np.asarray(hist[key]), max_steps) for hist in histories],
             axis=0,

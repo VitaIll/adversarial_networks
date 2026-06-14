@@ -23,8 +23,9 @@ References:
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from typing import Iterator, Mapping, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from torch import Tensor
 from torch.nn import Parameter
@@ -50,9 +51,10 @@ class StructuralModel(Protocol):
           so the engine is model-agnostic over ``{beta, gamma, sigma_sq}``,
           ``{gamma, lambda_, mu, r, sigma_sq}``, or any future game.
 
-    Both :class:`src.generator.SCMGenerator` and
-    :class:`src.effort_generator.EffortGameGenerator` satisfy this protocol
-    structurally. New network games plug in by implementing the same surface.
+    Both :class:`adversarial_networks.generators.LinearInMeansGenerator` and
+    :class:`adversarial_networks.generators.EffortGameGenerator` satisfy this
+    protocol structurally (via the ``NetworkGameGenerator`` base). New network
+    games plug in by implementing the same surface.
     """
 
     def __call__(self, W: Tensor, X: Tensor) -> Tensor: ...

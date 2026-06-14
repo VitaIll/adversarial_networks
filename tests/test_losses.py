@@ -14,7 +14,7 @@ import pytest
 import torch
 from torch.nn import functional as F
 
-from src.losses import (
+from adversarial_networks.losses import (
     discriminator_loss,
     generator_nonsaturating_loss,
     generator_saturating_loss,

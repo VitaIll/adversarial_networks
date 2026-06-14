@@ -19,11 +19,11 @@ benchmark and the structural path is flat.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Sequence
 
+from .core.objective import check_gan_convergence
 from .estimator_config import EstimatorConfig
-from .utils import check_gan_convergence
 
 
 @dataclass(frozen=True)

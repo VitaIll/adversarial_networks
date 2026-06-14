@@ -12,8 +12,8 @@ import torch
 from torch import Tensor
 from torch_geometric.utils import from_networkx, to_undirected
 
-from effort_generator import EffortGameGenerator
-from utils import build_row_stochastic_W
+from adversarial_networks.core.graph import row_stochastic_weights as build_row_stochastic_W
+from adversarial_networks.generators import EffortGameGenerator
 
 
 def _forward_fn_fixed_r(

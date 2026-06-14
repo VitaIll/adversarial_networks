@@ -5,19 +5,23 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src import EffortExperimentConfig, EffortModelConfig, RootedMPNNDiscriminator
+from adversarial_networks import RootedMPNNDiscriminator
+from adversarial_networks.config import EffortExperimentConfig, EffortModelConfig
 
 
 def test_effort_defaults_use_2_hops_with_matched_sampling_and_depth() -> None:
-    """Default effort config should target 2-hop neighborhoods with matched depth."""
+    """Default effort config should target 2-hop neighborhoods with matched depth.
+
+    Assertions track the shipped ``EffortExperimentConfig.default()`` values.
+    """
     cfg = EffortExperimentConfig.default()
     assert cfg.model.k == 2
     assert cfg.model.resolved_discriminator_layers() == 2
     assert cfg.training.n_steps == 2000
     assert cfg.training.n_disc == 1
     assert cfg.training.lr_d == 2e-4
-    assert cfg.training.lr_g == 3e-3
-    assert cfg.training.grad_clip_norm_g == 20.0
+    assert cfg.training.lr_g == 7e-3
+    assert cfg.training.grad_clip_norm_g == 25.0
     assert cfg.training.resolved_root_sampler_mode() == "disjoint_best_of_k"
     assert cfg.training.root_exclusion_r == 4
 

@@ -7,7 +7,7 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from src.visualization import plot_ground_truth_graph_outcomes
+from adversarial_networks.visualization import plot_ground_truth_graph_outcomes
 
 matplotlib.use("Agg")
 
