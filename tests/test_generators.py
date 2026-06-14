@@ -171,3 +171,46 @@ def test_builtin_get_params_keys_and_contraction_rate() -> None:
     assert set(eff.get_params()) == {"gamma", "lambda_", "mu", "r", "sigma_sq"}
     assert 0.0 < eff.contraction_rate < 1.0
     assert math.isclose(eff.contraction_rate, 0.5 / 1.5, rel_tol=1e-6)
+
+
+# ---------------------------------------------- generator-level Picard integration
+def test_picard_matches_dense_solve() -> None:
+    """The generator's full forward (shock draw + ``beta_cap·tanh`` reparam + Picard)
+    matches the dense ``(I - beta·W)^{-1}`` solve. This is an *integration* check of the
+    shock-seeding contract that the bare-``picard`` core unit test does not exercise
+    (relocated from the retired ``test_utils.py``)."""
+    torch.manual_seed(123)
+    n = 10
+    beta = 0.3
+    gamma = 1.0
+    sigma_sq = 1.0
+
+    graph = nx.path_graph(n)
+    edge_index = to_undirected(from_networkx(graph).edge_index, num_nodes=n)
+    W = row_stochastic_weights(edge_index=edge_index, num_nodes=n)
+    X = torch.randn(n, dtype=torch.float32)
+
+    generator = LinearInMeansGenerator(
+        beta_cap=0.9,
+        picard_tol=1e-10,
+        picard_max=300,
+        init_beta=beta,
+        init_gamma=gamma,
+        init_log_sigma_sq=math.log(sigma_sq),
+    )
+
+    torch.manual_seed(999)
+    y_picard = generator(W, X)
+
+    torch.manual_seed(999)
+    z = torch.randn_like(X)
+    eps = math.sqrt(sigma_sq) * z
+    rhs = X * gamma + eps
+    A = torch.eye(n, dtype=torch.float32) - beta * W.to_dense()
+    y_dense = torch.linalg.solve(A, rhs)
+
+    max_abs_error = torch.max(torch.abs(y_picard - y_dense)).item()
+    assert max_abs_error <= 1e-5, (
+        f"Generator Picard deviates from direct solve: max error {max_abs_error:.2e} "
+        f"(picard iters {generator.last_picard_iterations})"
+    )

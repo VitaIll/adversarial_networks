@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Repository hygiene & reorganization
+- **Licensing/packaging**: added a real `LICENSE` file (MIT) backing the `pyproject` declaration and ensured it
+  ships in built distributions via `[tool.setuptools] license-files`; single-sourced the version through
+  `[tool.setuptools.dynamic]` (no more dual `pyproject`/`__init__` literal).
+- **Repo structure**: the hand-written design docs under `docs/` are now tracked (the directory was previously
+  git-ignored wholesale, leaving the README's `docs/design/` links dead in a clone); added `CITATION.cff` and a
+  GitHub Actions CI workflow (`ruff` + `pytest`, CPU-only torch). The source-paper PDFs are kept out of version
+  control by decision (root `*.pdf` ignored).
+- **Dependencies / reproducibility**: added the genuinely-used `pandas` (and `pytest-html`/`ruff`) to
+  `environment.yml` and regenerated the conda lock; removed the mandatory `--html` from `pytest.ini addopts`
+  (the HTML report is now opt-in) so a non-`[dev]` install can run `pytest`.
+- **Tests**: retired the legacy `tests/test_utils.py`; its checks moved to `tests/test_core_graph.py`,
+  `tests/test_core_ego_features.py`, `tests/test_core_objective.py`, and (the generator-integration Picard
+  check) `tests/test_generators.py`, all using the real module names.
+
 ### Changed — general-framework refactor
 
 Refactored the package into a **general framework** for adversarial structural
@@ -58,7 +73,7 @@ design.
 - **Visualization utilities**: Added `src/visualization.py` with reusable plotting functions (`plot_parameter_convergence`, `plot_loss_convergence`, `plot_tail_stability`).
 - **I/O utilities**: Added `src/io_utils.py` with functions for saving CSV tables, computing file hashes, and JSON manifests.
 - **Test fixtures**: Added `tests/conftest.py` with shared pytest fixtures for graphs, normalization stats, and ego-caches.
-- **Test reporting**: Added pytest-html integration for visual HTML test reports at `tests/reports/report.html`.
+- **Test reporting**: Optional pytest-html HTML report at `tests/reports/report.html` (opt-in via `pytest --html=… --self-contained-html` with the `[dev]` extra; no longer auto-run from `addopts`).
 - **Package installation**: Added `pyproject.toml` for standard Python packaging with editable install support (`pip install -e .`).
 
 ### Changed

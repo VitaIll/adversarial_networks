@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite both the software and the paper below."
+title: adversarial_networks
+abstract: "A general framework for adversarial structural estimation of network-equilibrium models on a single graph."
+type: software
+authors:
+  - family-names: Illichmann
+    given-names: Vít
+version: 0.1.0
+date-released: "2026-02-08"
+license: MIT
+repository-code: "https://github.com/VitaIll/adversarial_networks"
+url: "https://github.com/VitaIll/adversarial_networks"
+keywords:
+  - adversarial estimation
+  - structural estimation
+  - network econometrics
+  - graph neural networks
+  - peer effects
+preferred-citation:
+  type: article
+  title: "Adversarial Structural Estimation on Graphs"
+  year: 2026
+  authors:
+    - family-names: Illichmann
+      given-names: Vít
+    - family-names: Zacchia
+      given-names: "P."   # TODO: expand to full given name; add doi/url when the paper is public

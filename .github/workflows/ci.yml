@@ -1,0 +1,27 @@
+name: CI
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # CPU-only torch: avoid the ~532 MB CUDA wheel. extra-index composes with PyPI,
+      # so the other deps (incl. the pure-python torch-geometric) still resolve normally.
+      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip            # hashes pyproject.toml (no requirements.txt needed)
+      - run: python -m pip install -U pip
+      - run: pip install -e .[dev]
+      - run: ruff check --output-format=github adversarial_networks tests
+      - run: pytest
