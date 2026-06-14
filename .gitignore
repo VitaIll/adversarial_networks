@@ -25,7 +25,9 @@ experiments/*.executed.ipynb
 # run artifacts (large, regenerated)
 /artifacts/
 
-# source papers — kept out of version control by decision; cite by arXiv/DOI in README
+# source papers — local working copies under papers/, kept out of version control
+# (cite via README References + CITATION.cff; add a DOI/arXiv link there once public)
+/papers/
 /*.pdf
 
 # test reports
