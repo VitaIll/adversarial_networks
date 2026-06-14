@@ -7,6 +7,7 @@ env/
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
 *.egg-info/
 build/
 dist/
@@ -15,9 +16,17 @@ dist/
 .ipynb_checkpoints/
 experiments/*.executed.ipynb
 
-# docs and artifacts
-/docs/
+# generated docs build output (Sphinx) — the hand-written docs/ tree IS tracked
+docs/_build/
+
+# legacy effort-game design doc: double-encoded mojibake + BOM, pending repair/salvage to docs/notes/
+/docs/effort_game_estimation_design.md
+
+# run artifacts (large, regenerated)
 /artifacts/
+
+# source papers — kept out of version control by decision; cite by arXiv/DOI in README
+/*.pdf
 
 # test reports
 tests/reports/

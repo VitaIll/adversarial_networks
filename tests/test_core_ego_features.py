@@ -1,12 +1,11 @@
-"""Deterministic CPU tests for the MVP utility module.
+"""Deterministic CPU tests for ``core.ego_features.extract_ego_batch``.
 
-All tests run on CPU with fixed seeds for reproducibility.
-Enhanced with detailed assertions showing expected vs actual values.
+Relocated from the retired ``test_utils.py``: root-marker construction, the
+instance-noise blur (disabled/enabled), and the pre-normalization noise property
+(``extract_ego_batch`` × ``core.objective.instance_noise_taus``).
 """
 
 from __future__ import annotations
-
-import math
 
 import networkx as nx
 import torch
@@ -14,129 +13,14 @@ from torch_geometric.utils import from_networkx, k_hop_subgraph, to_undirected
 
 from adversarial_networks.config import InstanceNoiseConfig
 from adversarial_networks.core.ego_features import extract_ego_batch
-from adversarial_networks.core.graph import row_stochastic_weights as build_row_stochastic_W
-from adversarial_networks.core.objective import instance_noise_taus as compute_instance_noise_taus
-from adversarial_networks.generators import LinearInMeansGenerator as SCMGenerator
+from adversarial_networks.core.objective import instance_noise_taus
 
 
 def _path_graph_edge_index(num_nodes: int) -> torch.Tensor:
-    """Helper: Create edge_index for a path graph."""
+    """Create edge_index for a path graph."""
     graph = nx.path_graph(num_nodes)
     data = from_networkx(graph)
     return to_undirected(data.edge_index, num_nodes=num_nodes)
-
-
-def test_W_row_stochastic() -> None:
-    """Test that W matrix is row-stochastic with proper shape and values."""
-    n = 10
-    edge_index = _path_graph_edge_index(n)
-    W = build_row_stochastic_W(edge_index=edge_index, num_nodes=n)
-    dense_W = W.to_dense()
-
-    # Check shape
-    assert W.shape == (n, n), f"Expected shape ({n}, {n}), got {W.shape}"
-
-    # Check all values are finite
-    assert torch.isfinite(dense_W).all(), "W contains non-finite values"
-
-    # Check row-stochastic property
-    row_sums = dense_W.sum(dim=1)
-    max_deviation = torch.max(torch.abs(row_sums - 1.0)).item()
-    tolerance = 1e-6
-
-    assert torch.allclose(row_sums, torch.ones(n), atol=tolerance, rtol=0.0), (
-        f"W is not row-stochastic:\n"
-        f"  Expected: all row sums = 1.0\n"
-        f"  Max deviation: {max_deviation:.2e}\n"
-        f"  Tolerance: {tolerance:.2e}\n"
-        f"  Row sums: {row_sums.tolist()}"
-    )
-
-
-def test_picard_matches_dense_solve() -> None:
-    """Test that Picard iteration matches direct (I - βW)^(-1) solve."""
-    torch.manual_seed(123)
-    n = 10
-    beta = 0.3
-    gamma = 1.0
-    sigma_sq = 1.0
-
-    edge_index = _path_graph_edge_index(n)
-    W = build_row_stochastic_W(edge_index=edge_index, num_nodes=n)
-    X = torch.randn(n, dtype=torch.float32)
-
-    generator = SCMGenerator(
-        beta_cap=0.9,
-        picard_tol=1e-10,
-        picard_max=300,
-        init_beta=beta,
-        init_gamma=gamma,
-        init_log_sigma_sq=math.log(sigma_sq),
-    )
-
-    torch.manual_seed(999)
-    y_picard = generator(W, X)
-
-    torch.manual_seed(999)
-    z = torch.randn_like(X)
-    eps = math.sqrt(sigma_sq) * z
-    rhs = X * gamma + eps
-    A = torch.eye(n, dtype=torch.float32) - beta * W.to_dense()
-    y_dense = torch.linalg.solve(A, rhs)
-
-    max_abs_error = torch.max(torch.abs(y_picard - y_dense)).item()
-    tolerance = 1e-5
-
-    assert max_abs_error <= tolerance, (
-        f"Picard solution deviates from direct solve:\n"
-        f"  Expected max error: ≤ {tolerance:.2e}\n"
-        f"  Actual max error:   {max_abs_error:.2e}\n"
-        f"  Picard iterations:  {generator.last_picard_iterations}\n"
-        f"  ||y_picard||:       {torch.norm(y_picard).item():.4f}\n"
-        f"  ||y_dense||:        {torch.norm(y_dense).item():.4f}\n"
-        f"  Relative error:     {max_abs_error / torch.norm(y_dense).item():.2e}"
-    )
-
-
-def test_generator_grad_flows_to_all_params() -> None:
-    """Test that gradients flow to all three generator parameters."""
-    torch.manual_seed(7)
-    n = 12
-    edge_index = _path_graph_edge_index(n)
-    W = build_row_stochastic_W(edge_index=edge_index, num_nodes=n)
-    X = torch.randn(n, dtype=torch.float32)
-
-    generator = SCMGenerator(
-        beta_cap=0.8,
-        picard_tol=1e-8,
-        picard_max=200,
-        init_beta=0.1,
-        init_gamma=0.2,
-        init_log_sigma_sq=-0.2,
-    )
-    y_sim = generator(W, X)
-    loss = y_sim.square().mean()
-    loss.backward()
-
-    for name in ("raw_beta", "gamma", "log_sigma_sq"):
-        param = getattr(generator, name)
-        grad = param.grad
-
-        assert grad is not None, (
-            f"Gradient is None for parameter '{name}'\n"
-            f"  Expected: non-None gradient tensor\n"
-            f"  Actual:   None\n"
-            f"  This indicates gradient flow is broken!"
-        )
-
-        grad_magnitude = grad.abs().item()
-        assert grad_magnitude > 0.0, (
-            f"Gradient is zero for parameter '{name}'\n"
-            f"  Expected: |grad| > 0\n"
-            f"  Actual:   |grad| = {grad_magnitude:.2e}\n"
-            f"  Parameter value: {param.item():.4f}\n"
-            f"  Loss value: {loss.item():.4f}"
-        )
 
 
 def test_extract_ego_batch_root_marker() -> None:
@@ -361,7 +245,7 @@ def test_instance_noise_is_applied_pre_normalization() -> None:
         min_tau=0.0,
         apply_to="both",
     )
-    tau_x, tau_y = compute_instance_noise_taus(blur_cfg, generator_step=50)
+    tau_x, tau_y = instance_noise_taus(blur_cfg, generator_step=50)
     assert tau_x == 0.0
     assert tau_y == 0.12
 
@@ -408,49 +292,3 @@ def test_instance_noise_is_applied_pre_normalization() -> None:
     expected_ratio = norm_stats_large["sigma_Y"] / norm_stats_small["sigma_Y"]
     assert abs(raw_ratio - expected_ratio) < 0.1
     assert torch.equal(batch_small.x[:, 2], batch_large.x[:, 2])
-
-
-def test_compute_instance_noise_taus_schedule_variants() -> None:
-    """Scheduler returns expected tau values for constant/linear/exp modes."""
-    cfg_constant = InstanceNoiseConfig(
-        enabled=True,
-        tau_x0=0.03,
-        tau_y0=0.08,
-        schedule="constant",
-        anneal_steps=200,
-        min_tau=0.0,
-    )
-    tx_c, ty_c = compute_instance_noise_taus(cfg_constant, generator_step=123)
-    assert tx_c == 0.03
-    assert ty_c == 0.08
-
-    cfg_linear = InstanceNoiseConfig(
-        enabled=True,
-        tau_x0=0.10,
-        tau_y0=0.20,
-        schedule="linear",
-        anneal_steps=100,
-        min_tau=0.02,
-    )
-    tx_0, ty_0 = compute_instance_noise_taus(cfg_linear, generator_step=0)
-    tx_mid, ty_mid = compute_instance_noise_taus(cfg_linear, generator_step=50)
-    tx_end, ty_end = compute_instance_noise_taus(cfg_linear, generator_step=1000)
-    assert tx_0 == 0.10 and ty_0 == 0.20
-    assert abs(tx_mid - 0.05) < 1e-12
-    assert abs(ty_mid - 0.10) < 1e-12
-    assert tx_end == 0.02 and ty_end == 0.02
-
-    cfg_exp = InstanceNoiseConfig(
-        enabled=True,
-        tau_x0=0.09,
-        tau_y0=0.15,
-        schedule="exp",
-        anneal_steps=100,
-        min_tau=0.01,
-    )
-    tx_e, ty_e = compute_instance_noise_taus(cfg_exp, generator_step=20)
-    expected_tx = max(0.01, 0.09 * math.exp(-20.0 / (100.0 / 5.0)))
-    expected_ty = max(0.01, 0.15 * math.exp(-20.0 / (100.0 / 5.0)))
-    assert abs(tx_e - expected_tx) < 1e-12
-    assert abs(ty_e - expected_ty) < 1e-12
-

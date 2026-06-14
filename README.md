@@ -125,6 +125,7 @@ submodule. Design docs: [docs/design/](docs/design/).
 pytest                 # the full suite
 pytest -m slow         # include the (slower) recovery test
 ruff check adversarial_networks tests
+pytest --html=tests/reports/report.html --self-contained-html   # optional HTML report (needs the [dev] extra)
 ```
 
 ## References

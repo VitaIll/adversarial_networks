@@ -4,11 +4,14 @@ channels:
 dependencies:
   - python=3.11
   - numpy=1.26.*
+  - pandas=2.*
   - networkx=3.6.*
   - matplotlib=3.10.*
   - notebook=7.5.*
   - jupyterlab=4.5.*
   - pytest=9.0.*
+  - pytest-html
+  - ruff
   - pip
   - pip:
       - torch==2.10.0

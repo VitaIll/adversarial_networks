@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "adversarial-networks"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A general framework for adversarial structural estimation of network-equilibrium models on a single graph"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,6 +28,12 @@ dev = [
     "pytest-html>=4.0",
     "ruff>=0.1",
 ]
+
+[tool.setuptools]
+license-files = ["LICENSE"]
+
+[tool.setuptools.dynamic]
+version = {attr = "adversarial_networks.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["adversarial_networks*"]
