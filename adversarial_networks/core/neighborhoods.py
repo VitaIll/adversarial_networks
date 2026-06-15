@@ -1,9 +1,15 @@
 """Disjoint-neighbourhood packing primitives (pure ``numpy``).
 
 These support the disjoint root samplers: precompute closed distance balls once,
-then greedily pack a maximal set of roots whose exclusion balls do not overlap
-(so the sampled ego objects are near-independent). Used by
-:mod:`adversarial_networks.sampling`.
+then greedily pack a maximal set of roots whose *exclusion* balls (the radius
+passed in, ``exclusion_r``) are disjoint by construction — i.e. every pair of
+selected roots ``u, v`` satisfies ``dist(u, v) > exclusion_r``. The packer is
+radius-agnostic: it excludes whatever ``balls[node]`` it is handed. Disjoint
+exclusion balls make the sampled radius-``k`` *ego objects* vertex-disjoint (hence
+near-independent) only when ``exclusion_r >= 2k``, since two radius-``k`` balls are
+vertex-disjoint iff the distance between their centres exceeds ``2k`` (Illichmann &
+Zacchia, 2026, Sec. 4.2, fn. 26). Choosing that radius is the caller's job. Used
+by :mod:`adversarial_networks.sampling`.
 """
 
 from __future__ import annotations

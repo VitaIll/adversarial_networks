@@ -20,9 +20,7 @@ class InstanceNoiseConfigLike(Protocol):
     """
 
     enabled: bool
-    tau_x0: float
     tau_y0: float
     schedule: str
     anneal_steps: int
     min_tau: float
-    apply_to: str

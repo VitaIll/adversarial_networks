@@ -1,7 +1,8 @@
 """Observability sinks for the adversarial estimation engine.
 
-The engine emits one :class:`~src.contracts.StepMetrics` per outer step to a list
-of :class:`~src.contracts.MetricsObserver` sinks. This module provides the
+The engine emits one :class:`~adversarial_networks.contracts.StepMetrics` per outer
+step to a list of :class:`~adversarial_networks.contracts.MetricsObserver` sinks.
+This module provides the
 concrete sinks:
 
 * :class:`InMemoryHistory` — collects every step into arrays (the structured
@@ -45,7 +46,6 @@ class InMemoryHistory(MetricsObserver):
         self.loss_d_rolling: list[float] = []
         self.loss_g_rolling: list[float] = []
         self.grad_norm_g: list[float] = []
-        self.tau_x: list[float] = []
         self.tau_y: list[float] = []
         self.picard_iterations: list[int] = []
         self.result: EstimationResult | None = None
@@ -64,7 +64,6 @@ class InMemoryHistory(MetricsObserver):
         self.loss_d_rolling.append(float(metrics.loss_d_rolling))
         self.loss_g_rolling.append(float(metrics.loss_g_rolling))
         self.grad_norm_g.append(float(metrics.grad_norm_g))
-        self.tau_x.append(float(metrics.tau_x))
         self.tau_y.append(float(metrics.tau_y))
         self.picard_iterations.append(int(metrics.picard_iterations))
 
@@ -82,8 +81,8 @@ class InMemoryHistory(MetricsObserver):
         """Flatten the history into a mapping of 1-D float arrays.
 
         Keys are the model's parameter names plus ``loss_d``, ``loss_g``,
-        ``loss_d_rolling``, ``loss_g_rolling``, ``grad_norm_g``, ``tau_x``,
-        ``tau_y``. Returns plain numpy arrays so the caller can ``np.savez`` them.
+        ``loss_d_rolling``, ``loss_g_rolling``, ``grad_norm_g``, ``tau_y``.
+        Returns plain numpy arrays so the caller can ``np.savez`` them.
         """
         import numpy as np
 
@@ -95,7 +94,6 @@ class InMemoryHistory(MetricsObserver):
         arrays["loss_d_rolling"] = np.asarray(self.loss_d_rolling, dtype=np.float64)
         arrays["loss_g_rolling"] = np.asarray(self.loss_g_rolling, dtype=np.float64)
         arrays["grad_norm_g"] = np.asarray(self.grad_norm_g, dtype=np.float64)
-        arrays["tau_x"] = np.asarray(self.tau_x, dtype=np.float64)
         arrays["tau_y"] = np.asarray(self.tau_y, dtype=np.float64)
         return arrays
 
@@ -144,7 +142,7 @@ class JsonlSink(MetricsObserver):
     """Streams one JSON record per step to a JSON Lines file.
 
     The file is opened at run start and closed at run end. Each line is a JSON
-    object of the full :class:`~src.contracts.StepMetrics`. A trailing record with
+    object of the full :class:`~adversarial_networks.contracts.StepMetrics`. A trailing record with
     the run result is written at the end.
     """
 

@@ -3,7 +3,7 @@
 
 Thin client over the estimation engine. All orchestration (seed streams, resume,
 durable logging, provenance, periodic figures) lives in
-:class:`src.runner.MonteCarloRunner`; this script only supplies the linear-in-
+:class:`adversarial_networks.runner.MonteCarloRunner`; this script only supplies the linear-in-
 means specifics — building the shared substrate, simulating the observed outcome
 from the true model, and constructing the fresh model + discriminator + config
 for each realisation — plus the visualisation hook.
@@ -40,7 +40,8 @@ from adversarial_networks import (  # noqa: E402  (path bootstrap must precede i
     LinearInMeansGenerator,
     RootedMPNNDiscriminator,
 )
-from adversarial_networks.config import ExperimentConfig, MonteCarloConfig  # noqa: E402
+from adversarial_networks.config import ExperimentConfig, GraphConfig, MonteCarloConfig  # noqa: E402
+from adversarial_networks.datasets import _build_lfr_graph  # noqa: E402
 from adversarial_networks.ego import EgoSubstrate  # noqa: E402
 from adversarial_networks.provenance import config_hash  # noqa: E402
 from adversarial_networks.runner import MonteCarloRunner, RealizationResult, RealizationSpec  # noqa: E402
@@ -54,11 +55,51 @@ DEVICE = torch.device("cpu")
 _HISTORY_KEYS = ("beta", "gamma", "sigma_sq", "loss_d", "loss_g")
 
 
+def _lfr_graph_kwargs(graph_cfg: GraphConfig) -> dict[str, object]:
+    """Map the LFR ``GraphConfig`` fields to ``_build_lfr_graph`` kwargs (None dropped).
+
+    networkx requires EXACTLY ONE of ``average_degree`` / ``min_degree``; the
+    ``GraphConfig`` validator already enforces that, and ``_build_lfr_graph`` honours
+    whichever is set. The cap knobs (``max_degree`` / ``max_community`` / ``min_degree``)
+    are forwarded so a ``GraphConfig``-driven LFR build honours the finite-moment cap
+    (D8-04-R1) — they are the knobs that bound ``E[D^2]`` (hence the branching ratio) under
+    a heavy tail.
+    """
+    kwargs: dict[str, object] = {
+        "tau1": graph_cfg.lfr_tau1,
+        "tau2": graph_cfg.lfr_tau2,
+        "mu": graph_cfg.lfr_mu,
+        "min_community": graph_cfg.lfr_min_community,
+        "max_community": graph_cfg.lfr_max_community,
+        "lfr_max_iters": graph_cfg.lfr_max_iters,
+    }
+    if graph_cfg.lfr_average_degree is not None:
+        kwargs["average_degree"] = graph_cfg.lfr_average_degree
+    if graph_cfg.lfr_min_degree is not None:
+        kwargs["min_degree"] = graph_cfg.lfr_min_degree
+    if graph_cfg.lfr_max_degree is not None:
+        kwargs["max_degree"] = graph_cfg.lfr_max_degree
+    return kwargs
+
+
+def _build_graph(graph_cfg: GraphConfig, seed: int) -> nx.Graph:
+    """Build the substrate graph for the configured ``graph_type`` (BA or capped LFR).
+
+    Dispatching on ``cfg.graph.graph_type`` (reusing ``datasets._build_lfr_graph`` for the
+    LFR branch with the ``GraphConfig`` cap knobs) makes the paper-scale
+    ``ExperimentConfig.default()`` (``graph_type='lfr'``) actually runnable by this driver,
+    not only the BA ``mc_default()`` (D8-06-R2).
+    """
+    if graph_cfg.graph_type == "ba":
+        return nx.barabasi_albert_graph(n=graph_cfg.n_nodes, m=graph_cfg.ba_m, seed=seed)
+    if graph_cfg.graph_type == "lfr":
+        return _build_lfr_graph(graph_cfg.n_nodes, seed, **_lfr_graph_kwargs(graph_cfg))
+    raise ValueError(f"graph_type must be 'ba' or 'lfr', got {graph_cfg.graph_type!r}.")
+
+
 def build_substrate(cfg: ExperimentConfig, mc_cfg: MonteCarloConfig) -> EgoSubstrate:
     """Build the shared graph + covariate substrate (once, reused across realisations)."""
-    if cfg.graph.graph_type != "ba":
-        raise ValueError(f"Expected graph_type='ba', got {cfg.graph.graph_type!r}.")
-    graph = nx.barabasi_albert_graph(n=cfg.graph.n_nodes, m=cfg.graph.ba_m, seed=mc_cfg.master_seed)
+    graph = _build_graph(cfg.graph, seed=mc_cfg.master_seed)
     torch.manual_seed(mc_cfg.master_seed + 1)
     X = torch.randn(graph.number_of_nodes(), device=DEVICE)
     return EgoSubstrate.from_networkx(
@@ -219,12 +260,21 @@ def _apply_overrides(cfg: ExperimentConfig, mc_cfg: MonteCarloConfig) -> tuple[E
         mc_cfg = replace(mc_cfg, progress_every_n_steps=(steps if steps > 0 else None))
 
     if os.environ.get("MC_SMOKE") == "1":
-        cfg = replace(cfg, graph=replace(cfg.graph, n_nodes=300))
+        # Shrink the blur anneal to the smoke horizon too: with max_steps=40 and
+        # tail_window=max(20,10)=20 the tail-averaging window starts at step 21, so the
+        # blur must reach zero by step <= max_steps-tail_window=20 (else EstimatorConfig.
+        # from_configs rightly rejects the residually-blurred smoke config). The shipped
+        # anneal_steps (900) would otherwise leave residual blur across the whole smoke run.
+        cfg = replace(
+            cfg,
+            graph=replace(cfg.graph, n_nodes=300),
+            instance_noise=replace(cfg.instance_noise, anneal_steps=20),
+        )
         # Keep MonteCarloConfig internally consistent: earliest feasible stop is
-        # max(convergence_window + dwell - 1, stability_window, min_steps + dwell - 1).
+        # max(convergence_window, stability_window, min_steps).
         mc_cfg = replace(
             mc_cfg, n_realizations=min(mc_cfg.n_realizations, 3), max_steps=40, min_steps=0,
-            convergence_window=20, stability_window=10, equilibrium_dwell_steps=5,
+            convergence_window=20, stability_window=10,
             plot_every_n_realizations=2, lr_g_decay_steps=(20,),
         )
     return cfg, mc_cfg

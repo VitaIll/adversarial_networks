@@ -1,9 +1,17 @@
 """Configurable root samplers for ego-graph batching.
 
 The sampler selects root node ids for a discriminator/generator batch — either a
-plain uniform draw, or a *disjoint* greedy packing whose roots' exclusion balls do
-not overlap (so the sampled ego objects are near-independent). The graph/packing
-primitives live in :mod:`adversarial_networks.core.graph` and
+plain uniform draw, or a *disjoint* greedy packing that excludes, around each
+accepted root ``u``, the closed ball of radius ``exclusion_r`` (so the selected
+roots satisfy ``dist(u, v) > exclusion_r`` pairwise, i.e. their radius-``exclusion_r``
+balls are disjoint by construction). This is the paper's batch-overlap fix
+(Illichmann & Zacchia, 2026, Sec. 4.2, fn. 26): two radius-``k`` ego balls are
+*vertex-disjoint* iff the distance between their centres exceeds ``2k``, so the
+sampled radius-``k`` ego objects are vertex-disjoint — hence near-independent — only
+when ``exclusion_r >= 2k`` (with ``k`` the discriminator/ego depth). The sampler
+itself does not know ``k``; choosing/validating ``exclusion_r = 2k`` is the job of
+the caller that owns ``k`` (see :class:`adversarial_networks.ego.EgoSubstrate`).
+The graph/packing primitives live in :mod:`adversarial_networks.core.graph` and
 :mod:`adversarial_networks.core.neighborhoods`; this module is the configured
 front end over them.
 """

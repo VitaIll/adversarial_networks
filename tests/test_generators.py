@@ -15,6 +15,7 @@ import pytest
 import torch
 from torch_geometric.utils import from_networkx, to_undirected
 
+from adversarial_networks.core.equilibrium import EquilibriumNotConverged
 from adversarial_networks.core.graph import row_stochastic_weights
 from adversarial_networks.generators import (
     EffortGameGenerator,
@@ -162,6 +163,140 @@ def test_implicit_matches_unroll_on_effort_game() -> None:
     assert (y_u - y_i).abs().max().item() < 1e-4
     for name in g_u:
         assert torch.allclose(g_u[name], g_i[name], rtol=1e-4, atol=1e-5), name
+
+
+# ------------------------------------------------- one-time hook post-condition guard
+def test_forward_rejects_wrong_shape_best_response() -> None:
+    """A ``best_response`` that returns a wrong-shape tensor (here ``(n, 2)``) must trip
+    the one-time boundary post-condition inside ``forward`` — an attributable ValueError
+    naming the hook and the model class, not a cryptic failure many Picard steps later."""
+    class BadShapeGame(NetworkGameGenerator):
+        beta = Interval(-0.8, 0.8)
+        sigma_sq = Positive()
+
+        def best_response(self, peer_agg, X, shocks):
+            out = self.params()["beta"] * peer_agg + shocks
+            return out.unsqueeze(-1).expand(-1, 2)  # wrong shape (n, 2)
+
+    n = 20
+    W = _w(n, seed=6)
+    X = torch.randn(n)
+    model = BadShapeGame()
+    with pytest.raises(ValueError, match="best_response"):
+        model(W, X)
+    # the message also attributes the failing model class
+    try:
+        model(W, X)
+    except ValueError as exc:
+        assert "BadShapeGame" in str(exc)
+
+
+def test_forward_rejects_grad_disconnected_best_response() -> None:
+    """When a parameter requires grad, a ``best_response`` that detaches its output
+    breaks the structural gradient; the post-condition must reject it (and stay silent
+    under ``no_grad``, where the check is correctly gated)."""
+    class DetachGame(NetworkGameGenerator):
+        beta = Interval(-0.8, 0.8)
+        sigma_sq = Positive()
+
+        def best_response(self, peer_agg, X, shocks):
+            return (self.params()["beta"] * peer_agg + shocks).detach()
+
+    n = 15
+    W = _w(n, seed=7)
+    X = torch.randn(n)
+    model = DetachGame()
+    with pytest.raises(ValueError, match="grad-connected"):
+        model(W, X)
+    with torch.no_grad():  # gated off: no grad to connect, so no post-condition failure
+        Y = model(W, X)
+    assert Y.shape == (n,)
+
+
+def test_forward_rejects_scalar_grad_connected_foc_residual() -> None:
+    """A grad-connected SCALAR foc_residual broadcasts through Newton's z - g/g' back to
+    the (n,) iterate, so the forward post-condition (which inspects Newton's OUTPUT) cannot
+    catch it — the primitive's first-iteration shape guard on the RAW residual must (D2-03).
+    """
+    class ScalarFocGame(NetworkGameGenerator):
+        gamma = Real()
+        sigma_sq = Positive()
+
+        def foc_residual(self, y, peer_agg, X, shocks):
+            # Collapses (n,) -> scalar but stays grad-connected to gamma.
+            return (y - self.params()["gamma"] * X - shocks).sum()
+
+    n = 12
+    W = _w(n, seed=11)
+    X = torch.randn(n)
+    model = ScalarFocGame(initial_values={"gamma": 1.0, "sigma_sq": 1.0})
+    with pytest.raises(ValueError, match="residual_fn"):
+        model(W, X)
+
+
+def test_raise_on_nonconvergence_raises_equilibrium_not_converged() -> None:
+    """With raise_on_nonconvergence=True, a Picard solve that hits its cap without the tol
+    test firing raises EquilibriumNotConverged carrying the residual/tol/cap."""
+    n = 40
+    W = _w(n, seed=12)
+    X = torch.randn(n)
+    # picard_max=1 cannot reach the beta=0.5 equilibrium from the zero start.
+    model = LinearInMeansGenerator(
+        beta_cap=0.85, init_beta=0.5, init_gamma=1.0, picard_max=1
+    )
+    model.raise_on_nonconvergence = True
+    with pytest.raises(EquilibriumNotConverged) as exc:
+        model(W, X)
+    assert exc.value.max_iter == 1
+    assert exc.value.residual >= exc.value.tol
+
+
+def test_forward_records_picard_residual_and_converged() -> None:
+    """A converged forward records last_picard_residual (< tol) and last_picard_converged."""
+    n = 20
+    W = _w(n, seed=13)
+    X = torch.randn(n)
+    model = LinearInMeansGenerator(beta_cap=0.85, init_beta=0.4, init_gamma=1.5, picard_tol=1e-7)
+    torch.manual_seed(0)
+    model(W, X)
+    assert model.last_picard_converged is True
+    assert model.last_picard_residual < 1e-7
+
+
+def test_scalar_builtins_reject_vector_covariate_attributably() -> None:
+    """The scalar built-ins (Linear/Effort) fed a (n, d_x>=2) X must raise an attributable
+    ValueError at the boundary (naming the class + the scalar-only scope), not a raw
+    broadcast RuntimeError deep inside best_response (D7-REG-01)."""
+    n = 20
+    W = _w(n, seed=14)
+    X2 = torch.randn(n, 2)
+    for model in (
+        LinearInMeansGenerator(beta_cap=0.85, init_beta=0.4, init_gamma=1.5),
+        EffortGameGenerator(init_lambda=0.5, init_mu=0.1),
+    ):
+        with pytest.raises(ValueError, match="scalar covariate only"):
+            model(W, X2)
+        # the message attributes the model class
+        try:
+            model(W, X2)
+        except ValueError as exc:
+            assert type(model).__name__ in str(exc)
+    # a (n,) X still works (scalar path unchanged)
+    Y = LinearInMeansGenerator(beta_cap=0.85, init_beta=0.4, init_gamma=1.5)(W, torch.randn(n))
+    assert Y.shape == (n,)
+
+
+def test_builtin_forward_passes_hook_postcondition() -> None:
+    """The built-in generators satisfy the post-conditions: a forward runs fine and is
+    grad-connected (the checks are designed to pass for valid models)."""
+    n = 20
+    W = _w(n, seed=8)
+    X = torch.randn(n)
+    model = LinearInMeansGenerator(beta_cap=0.85, init_beta=0.4, init_gamma=1.5)
+    torch.manual_seed(0)
+    Y = model(W, X)
+    assert Y.shape == (n,) and bool(torch.isfinite(Y).all())
+    assert Y.requires_grad  # grad-connected through the solve
 
 
 def test_builtin_get_params_keys_and_contraction_rate() -> None:

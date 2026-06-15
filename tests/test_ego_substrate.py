@@ -8,10 +8,13 @@ validation, and NetworkX sanitisation with covariate re-indexing.
 
 from __future__ import annotations
 
+from itertools import combinations
+
 import networkx as nx
 import numpy as np
 import pytest
 import torch
+from torch_geometric.utils import k_hop_subgraph
 
 from adversarial_networks.ego import EgoSubstrate
 from adversarial_networks.sampling import RootSampler
@@ -21,6 +24,30 @@ def _path_edge_index(n: int) -> torch.Tensor:
     src = torch.arange(n - 1, dtype=torch.long)
     dst = torch.arange(1, n, dtype=torch.long)
     return torch.stack([torch.cat([src, dst]), torch.cat([dst, src])])
+
+
+def _ego_node_set(edge_index: torch.Tensor, root: int, k: int, num_nodes: int) -> set[int]:
+    """Vertex set of the radius-``k`` ego ball around ``root`` (global ids)."""
+    subset, _, _, _ = k_hop_subgraph(
+        node_idx=int(root),
+        num_hops=k,
+        edge_index=edge_index,
+        relabel_nodes=False,
+        num_nodes=num_nodes,
+    )
+    return {int(v) for v in subset.tolist()}
+
+
+def _max_pairwise_ego_overlap(substrate: EgoSubstrate, roots: torch.Tensor) -> int:
+    """Largest pairwise shared-vertex count among the roots' radius-``k`` ego balls."""
+    sets = {
+        int(r): _ego_node_set(substrate.edge_index, int(r), substrate.k, substrate.num_nodes)
+        for r in roots.tolist()
+    }
+    return max(
+        (len(sets[a] & sets[b]) for a, b in combinations(sets, 2)),
+        default=0,
+    )
 
 
 def _uniform_substrate(n: int, k: int, seed: int = 0) -> EgoSubstrate:
@@ -113,3 +140,62 @@ def test_from_networkx_rejects_mismatched_covariate_length() -> None:
     graph = nx.path_graph(4)
     with pytest.raises(ValueError):
         EgoSubstrate.from_networkx(graph, torch.randn(3), k=1)
+
+
+# --------------------------------------------------- vertex-disjointness (fn. 26)
+def _grid_graph(side: int) -> nx.Graph:
+    return nx.convert_node_labels_to_integers(nx.grid_2d_graph(side, side), ordering="sorted")
+
+
+def test_from_networkx_default_exclusion_r_is_two_k_in_disjoint_mode() -> None:
+    """With no exclusion_r supplied, a disjoint substrate defaults to 2*k (fn. 26)."""
+    k = 2
+    graph = _grid_graph(8)
+    X = torch.randn(graph.number_of_nodes())
+    sub = EgoSubstrate.from_networkx(graph, X, k=k, root_sampler_mode="disjoint_best_of_k")
+    assert sub.root_sampler.exclusion_r == 2 * k
+
+    # disjoint_relax derives the same vertex-disjoint radius as its (single) ladder rung.
+    sub_relax = EgoSubstrate.from_networkx(graph, X, k=k, root_sampler_mode="disjoint_relax")
+    assert sub_relax.root_sampler.disjoint_relax_sequence == (2 * k,)
+
+
+def test_disjoint_egos_are_vertex_disjoint_at_two_k() -> None:
+    """The independence guarantee: at exclusion_r == 2*k the packed radius-k egos
+    are pairwise vertex-disjoint (share no nodes)."""
+    k = 2
+    graph = _grid_graph(8)
+    X = torch.randn(graph.number_of_nodes())
+    # Default exclusion_r in a disjoint mode is 2*k; many restarts to pack a few roots.
+    sub = EgoSubstrate.from_networkx(
+        graph, X, k=k, root_sampler_mode="disjoint_best_of_k",
+        disjoint_restarts_k=20, seed=3,
+    )
+    roots, result = sub.sample_roots(12)
+    assert result.radius_used == 2 * k
+    assert int(roots.numel()) >= 2, "Need at least two roots to test disjointness."
+    assert _max_pairwise_ego_overlap(sub, roots) == 0, (
+        "radius-k egos must be pairwise vertex-disjoint when exclusion_r == 2*k."
+    )
+
+
+def test_sub_two_k_exclusion_overlaps_and_warns() -> None:
+    """Below 2*k a disjoint substrate (a) warns that egos are not vertex-disjoint and
+    (b) can pack roots whose radius-k egos actually share vertices."""
+    k = 2
+    graph = _grid_graph(8)
+    X = torch.randn(graph.number_of_nodes())
+
+    # Sub-2k exclusion radius must emit exactly the documented RuntimeWarning.
+    with pytest.warns(RuntimeWarning, match=r"NOT vertex-disjoint"):
+        sub = EgoSubstrate.from_networkx(
+            graph, X, k=k, root_sampler_mode="disjoint_best_of_k",
+            exclusion_r=1, disjoint_restarts_k=1, seed=3,
+        )
+
+    assert sub.root_sampler.exclusion_r == 1 < 2 * k
+    # Fill the batch greedily; with exclusion_r=1 (< 2*k=4) the k=2 egos overlap.
+    roots, _ = sub.sample_roots(20)
+    assert _max_pairwise_ego_overlap(sub, roots) > 0, (
+        "radius-k egos can share vertices when exclusion_r < 2*k."
+    )

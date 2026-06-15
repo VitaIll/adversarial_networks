@@ -1,7 +1,7 @@
 """adversarial_networks — a general framework for adversarial structural estimation
 of network-equilibrium models on a single graph.
 
-The top-level surface is **framework-first** (~24 names). Advanced machinery
+The top-level surface is **framework-first** (~26 names). Advanced machinery
 (``EgoSubstrate``, ``RootSampler``, the losses, ``StoppingRule``, provenance, the
 experiment ``*Config`` dataclasses, the plotters, ``core.*``) is reachable from its
 submodule (e.g. ``adversarial_networks.ego.EgoSubstrate``,
@@ -51,6 +51,8 @@ from .generators import (
     ModelReport,
     NetworkGameGenerator,
     check_model,
+    estimate_branching,
+    moment_condition_margin,
 )
 from .observability import CompositeObserver, ConsoleLogger, InMemoryHistory, JsonlSink
 from .reporting import recovery_table
@@ -71,6 +73,8 @@ __all__ = [
     "RootedMPNNDiscriminator",
     "check_model",
     "ModelReport",
+    "estimate_branching",
+    "moment_condition_margin",
     "transforms",
     # --- provided model instances ---
     "LinearInMeansGenerator",

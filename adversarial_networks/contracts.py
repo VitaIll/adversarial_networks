@@ -36,15 +36,17 @@ class StructuralModel(Protocol):
     """A differentiable structural simulator over a single fixed graph.
 
     A ``StructuralModel`` maps the (row-stochastic) interaction matrix ``W`` and
-    the covariate vector ``X`` to a simulated equilibrium outcome ``Y`` with
+    the covariates ``X`` to a simulated equilibrium outcome ``Y`` with
     fresh structural shocks, differentiably in its leaf parameters. It is an
     ``nn.Module`` (so it owns its parameters, dtype and device) and reports its
     current *constrained* structural parameters through :meth:`get_params`.
 
     Contract:
         * ``model(W, X) -> Y`` where ``W`` is a sparse ``(n, n)`` COO tensor,
-          ``X`` is a dense ``(n,)`` float tensor on the same device, and ``Y`` is
-          a dense ``(n,)`` float tensor carrying gradients to the leaf params.
+          ``X`` is a dense ``(n,)`` (scalar covariate) or ``(n, d_x)`` (vector
+          covariate) float tensor on the same device, and ``Y`` is a dense ``(n,)``
+          float tensor carrying gradients to the leaf params (the outcome is scalar
+          per node regardless of ``d_x``).
         * ``get_params()`` returns a mapping from human-readable parameter name
           to its current constrained scalar value (no gradient). The set of keys
           is fixed for a given model instance but is *not* assumed by the engine,
@@ -109,13 +111,23 @@ class StepMetrics:
         roots_requested: Root batch size requested from the sampler.
         roots_achieved: Root batch size actually returned (``< requested`` only
             under disjoint packing shortfalls).
-        tau_x: Instance-noise blur std applied to covariates this step.
         tau_y: Instance-noise blur std applied to outcomes this step.
-        in_equilibrium: Whether the loss-band convergence check passed this step.
+        in_equilibrium: Whether the GAN loss-band convergence check passed this step
+            (a *training* diagnostic — distinct from ``picard_converged``, which is the
+            equilibrium *solver*'s own convergence).
         lr_g: Effective structural learning rate this step (after any decay).
         newton_iterations: Max Newton iterations used (nonlinear games only).
         sampler_radius: Disjoint-exclusion radius actually used (``None`` for
             uniform sampling).
+        picard_residual: Final Picard residual ``max|Y_{t+1}-Y_t|`` of the
+            structural-phase solve (``0.0`` when unavailable). The quantity that
+            distinguishes a genuine convergence from a cap truncation.
+        picard_converged: Whether the structural-phase Picard tolerance test fired
+            (``False`` on a cap hit). Distinct from the GAN-loss ``in_equilibrium``.
+        sampler_met_target: Whether the structural-phase root draw met its target
+            batch size (``False`` under a packing shortfall).
+        sampler_fallback_reason: The structural-phase sampler fallback reason (empty
+            string when none) — per-step structured attribution of a shortfall.
         param_grads: Per-leaf-parameter gradient component (raw-parameter space),
             for gradient-SNR diagnostics; ``None`` when not collected.
         extras: Open diagnostic slot (e.g. ``fisher_condition_number``).
@@ -131,12 +143,15 @@ class StepMetrics:
     picard_iterations: int
     roots_requested: int
     roots_achieved: int
-    tau_x: float
     tau_y: float
     in_equilibrium: bool
     lr_g: float
     newton_iterations: int | None = None
     sampler_radius: int | None = None
+    picard_residual: float = 0.0
+    picard_converged: bool = True
+    sampler_met_target: bool = True
+    sampler_fallback_reason: str = ""
     param_grads: Mapping[str, float] | None = None
     extras: Mapping[str, float] = field(default_factory=dict)
 

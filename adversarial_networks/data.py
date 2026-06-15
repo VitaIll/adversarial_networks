@@ -8,11 +8,12 @@ precomputed ``k``-ego cache + the root sampler); the substrate is reusable acros
 Monte Carlo realisations, but a ``NetworkData`` always carries exactly one outcome.
 
 Construction validates at the boundary and **validates before assigning** (no
-half-built object on a validation error — the DoubleML #144 anti-pattern): ``X``
-and ``y`` must be finite 1-D ``float32`` tensors of the node count, on one device.
-Graph sanitisation (self-loops removed, restricted to the largest connected
-component, relabelled) happens inside the substrate, and ``y`` is re-indexed onto
-the kept nodes identically to ``X``.
+half-built object on a validation error — the DoubleML #144 anti-pattern): ``X`` is a
+finite ``float32`` tensor of shape ``(n,)`` (scalar covariate) or ``(n, d_x)`` (vector
+covariate) and ``y`` a finite 1-D ``float32`` tensor, both of the node count and on
+one device. Graph sanitisation (self-loops removed, restricted to the largest
+connected component, relabelled) happens inside the substrate, and ``y`` is re-indexed
+onto the kept nodes identically to ``X`` (whose rows are re-indexed in the substrate).
 """
 
 from __future__ import annotations
@@ -38,6 +39,35 @@ def _validate_vector(name: str, tensor: Tensor, *, length: int | None = None,
         raise TypeError(f"{name} must be a torch.Tensor, got {type(tensor).__name__}.")
     if tensor.ndim != 1:
         raise ValueError(f"{name} must be 1-D (shape (n,)), got shape {tuple(tensor.shape)}.")
+    if tensor.dtype != torch.float32:
+        raise TypeError(
+            f"{name} must be float32 (the estimation contract rejects rather than "
+            f"silently downcasts), got {tensor.dtype}."
+        )
+    if not bool(torch.isfinite(tensor).all()):
+        raise ValueError(f"{name} contains non-finite values (NaN/inf).")
+    if length is not None and int(tensor.shape[0]) != length:
+        raise ValueError(f"{name} must have length {length}, got {int(tensor.shape[0])}.")
+    if device is not None and tensor.device != device:
+        raise ValueError(f"{name} must be on device {device}, got {tensor.device}.")
+
+
+def _validate_covariates(name: str, tensor: Tensor, *, length: int | None = None,
+                         device: torch.device | None = None) -> None:
+    """Reject anything but a finite ``float32`` covariate tensor (no silent coercion).
+
+    Generalises :func:`_validate_vector` to the covariate ``X``, which may be a single
+    scalar per node (shape ``(n,)``, ``d_x = 1``) or a vector per node (shape
+    ``(n, d_x)``, ``d_x >= 1``). ``length`` constrains the node count (row axis).
+    """
+    if not isinstance(tensor, Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor, got {type(tensor).__name__}.")
+    if tensor.ndim not in (1, 2):
+        raise ValueError(
+            f"{name} must have shape (n,) or (n, d_x), got shape {tuple(tensor.shape)}."
+        )
+    if tensor.ndim == 2 and int(tensor.shape[1]) < 1:
+        raise ValueError(f"{name} must have at least one covariate column (d_x >= 1).")
     if tensor.dtype != torch.float32:
         raise TypeError(
             f"{name} must be float32 (the estimation contract rejects rather than "
@@ -77,10 +107,10 @@ class NetworkData:
         *,
         k: int,
         root_sampler_mode: str = "uniform",
-        exclusion_r: int = 0,
+        exclusion_r: int | None = None,
         disjoint_restarts_k: int = 1,
         disjoint_min_batch: int | None = None,
-        disjoint_relax_sequence: tuple[int, ...] = (0,),
+        disjoint_relax_sequence: tuple[int, ...] | None = None,
         disjoint_fallback: str = "best",
         seed: int = 0,
     ) -> NetworkData:
@@ -90,9 +120,16 @@ class NetworkData:
         to the largest connected component, relabelled); ``X`` *and* ``y`` are
         re-indexed onto the kept nodes. The sanitisation counts are on
         :attr:`sanitization_report`.
+
+        In a disjoint ``root_sampler_mode`` an unset ``exclusion_r`` /
+        ``disjoint_relax_sequence`` (``None``) defaults to the vertex-disjoint radius
+        ``2 * k``, so the sampled radius-``k`` egos are near-independent (fn. 26);
+        explicit radii below ``2 * k`` trade independence for batch fill and emit a
+        ``RuntimeWarning`` from the substrate. Both controls are inherited from
+        :meth:`EgoSubstrate.from_networkx`.
         """
         n_graph = graph.number_of_nodes()
-        _validate_vector("X", X, length=n_graph)
+        _validate_covariates("X", X, length=n_graph)
         _validate_vector("y", y, length=n_graph, device=X.device)
         topology = EgoSubstrate.from_networkx(
             graph, X, k=k, root_sampler_mode=root_sampler_mode, exclusion_r=exclusion_r,
@@ -119,7 +156,7 @@ class NetworkData:
     ) -> NetworkData:
         """Build from a clean, contiguously labelled edge index (no sanitisation)."""
         n = int(X.shape[0])
-        _validate_vector("X", X)
+        _validate_covariates("X", X)
         _validate_vector("y", y, length=n, device=X.device)
         if root_sampler is None:
             import numpy as np

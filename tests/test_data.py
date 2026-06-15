@@ -87,7 +87,10 @@ def test_simulate_classmethod_builds_outcome_from_model() -> None:
     X = torch.randn(graph.number_of_nodes())
     model = LinearInMeansGenerator(beta_cap=0.85, init_beta=0.4, init_gamma=1.5)
     data = NetworkData.simulate(graph, X, model, k=2, seed=1)
-    assert data.num_nodes == graph.number_of_nodes() or data.num_nodes <= graph.number_of_nodes()
+    # A Barabasi-Albert graph is connected and self-loop-free, so sanitisation drops
+    # nothing: every node survives and the simulated outcome covers them all.
+    assert data.num_nodes == graph.number_of_nodes()
+    assert data.y.shape == (data.num_nodes,)
     assert data.y.dtype == torch.float32 and bool(torch.isfinite(data.y).all())
 
 

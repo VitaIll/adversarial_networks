@@ -129,7 +129,7 @@ def test_extract_ego_batch_blur_disabled_matches_baseline() -> None:
         norm_stats=norm_stats,
     )
 
-    blur_cfg = InstanceNoiseConfig(enabled=False, tau_x0=0.07, tau_y0=0.12)
+    blur_cfg = InstanceNoiseConfig(enabled=False, tau_y0=0.12)
     batch_disabled, idx_disabled = extract_ego_batch(
         roots=roots,
         ego_cache=ego_cache,
@@ -146,8 +146,8 @@ def test_extract_ego_batch_blur_disabled_matches_baseline() -> None:
     assert torch.equal(idx_base, idx_disabled)
 
 
-def test_extract_ego_batch_blur_enabled_changes_xy_not_root_marker() -> None:
-    """Enabled blur perturbs X/Y features while preserving root marker exactly."""
+def test_extract_ego_batch_blur_enabled_changes_y_not_x_or_root_marker() -> None:
+    """Enabled blur perturbs only the outcome (Y) feature, never X or the root marker."""
     torch.manual_seed(2025)
     n = 32
     edge_index = _path_graph_edge_index(n)
@@ -184,7 +184,6 @@ def test_extract_ego_batch_blur_enabled_changes_xy_not_root_marker() -> None:
 
     blur_cfg = InstanceNoiseConfig(
         enabled=True,
-        tau_x0=0.05,
         tau_y0=0.10,
         schedule="constant",
         anneal_steps=0,
@@ -212,8 +211,9 @@ def test_extract_ego_batch_blur_enabled_changes_xy_not_root_marker() -> None:
         batch_role="fake",
     )
 
-    delta_xy = (batch_blur.x[:, :2] - batch_base.x[:, :2]).abs()
-    assert torch.any(delta_xy > 0.0), "Blur enabled but X/Y features did not change."
+    delta_y = (batch_blur.x[:, 1] - batch_base.x[:, 1]).abs()
+    assert torch.any(delta_y > 0.0), "Blur enabled but the Y feature did not change."
+    assert torch.equal(batch_base.x[:, 0], batch_blur.x[:, 0]), "Covariate X was perturbed."
     assert torch.equal(batch_base.x[:, 2], batch_blur.x[:, 2]), "Root marker changed."
     assert torch.equal(idx_base, idx_blur)
     assert torch.equal(batch_blur.x, batch_blur_repeat.x), "Fixed-seed blur is not deterministic."
@@ -238,15 +238,12 @@ def test_instance_noise_is_applied_pre_normalization() -> None:
 
     blur_cfg = InstanceNoiseConfig(
         enabled=True,
-        tau_x0=0.0,
         tau_y0=0.12,
         schedule="constant",
         anneal_steps=0,
         min_tau=0.0,
-        apply_to="both",
     )
-    tau_x, tau_y = instance_noise_taus(blur_cfg, generator_step=50)
-    assert tau_x == 0.0
+    tau_y = instance_noise_taus(blur_cfg, generator_step=50)
     assert tau_y == 0.12
 
     norm_stats_small = {"mu_X": 0.0, "sigma_X": 1.0, "mu_Y": 0.0, "sigma_Y": 2.0}
@@ -292,3 +289,94 @@ def test_instance_noise_is_applied_pre_normalization() -> None:
     expected_ratio = norm_stats_large["sigma_Y"] / norm_stats_small["sigma_Y"]
     assert abs(raw_ratio - expected_ratio) < 0.1
     assert torch.equal(batch_small.x[:, 2], batch_large.x[:, 2])
+
+
+def test_covariates_never_perturbed_real_vs_fake_same_roots() -> None:
+    """X_tilde is identical across real/fake batches and equals the un-blurred X.
+
+    The covariate channel is the theta-independent conditioning signature: the
+    instance-noise stabiliser must perturb only the outcome coordinates. Built from
+    the SAME roots with blur enabled (``tau_y0>0``) under a fixed seed, the X_tilde
+    column (feature col 0) must be bit-identical between the real and fake batches and
+    bit-identical to the un-blurred normalised X; only the Y_tilde column (col 1) may
+    differ. The blur is always symmetric (applied identically to real and fake).
+    """
+    n = 24
+    edge_index = _path_graph_edge_index(n)
+
+    ego_cache: dict[int, tuple[torch.Tensor, torch.Tensor, int]] = {}
+    for root in range(n):
+        subset, sub_edge_index, mapping, _ = k_hop_subgraph(
+            node_idx=root,
+            num_hops=2,
+            edge_index=edge_index,
+            relabel_nodes=True,
+            num_nodes=n,
+        )
+        ego_cache[root] = (subset, sub_edge_index, int(mapping.item()))
+
+    roots = torch.arange(0, n, 3, dtype=torch.long)
+    torch.manual_seed(123)
+    X = torch.randn(n, dtype=torch.float32)
+    Y = torch.randn(n, dtype=torch.float32)
+    norm_stats = {
+        "mu_X": float(X.mean().item()),
+        "sigma_X": float(X.std(unbiased=False).item()),
+        "mu_Y": float(Y.mean().item()),
+        "sigma_Y": float(Y.std(unbiased=False).item()),
+    }
+
+    blur_cfg = InstanceNoiseConfig(
+        enabled=True,
+        tau_y0=0.30,
+        schedule="constant",
+        anneal_steps=0,
+        min_tau=0.0,
+    )
+
+    # Un-blurred baseline X_tilde for the same roots.
+    batch_base, _ = extract_ego_batch(
+        roots=roots, ego_cache=ego_cache, X=X, Y=Y, norm_stats=norm_stats,
+    )
+
+    # Same roots, blur enabled, identical fixed seed for both roles.
+    torch.manual_seed(4242)
+    batch_real, idx_real = extract_ego_batch(
+        roots=roots, ego_cache=ego_cache, X=X, Y=Y, norm_stats=norm_stats,
+        instance_noise=blur_cfg, generator_step=5, batch_role="real",
+    )
+    torch.manual_seed(4242)
+    batch_fake, idx_fake = extract_ego_batch(
+        roots=roots, ego_cache=ego_cache, X=X, Y=Y, norm_stats=norm_stats,
+        instance_noise=blur_cfg, generator_step=5, batch_role="fake",
+    )
+
+    # (a) Covariates are never perturbed: X_tilde bit-identical across roles and
+    #     identical to the un-blurred normalised X.
+    assert torch.equal(batch_real.x[:, 0], batch_fake.x[:, 0]), (
+        "X_tilde differs between real and fake batches; covariates were perturbed."
+    )
+    assert torch.equal(batch_real.x[:, 0], batch_base.x[:, 0]), (
+        "X_tilde differs from the un-blurred normalised X; covariates were perturbed."
+    )
+    # And the same outcome blur was applied to both (same roots, same seed): Y matches.
+    assert torch.equal(batch_real.x[:, 1], batch_fake.x[:, 1])
+    # The outcome channel IS perturbed relative to the un-blurred baseline.
+    assert torch.any((batch_real.x[:, 1] - batch_base.x[:, 1]).abs() > 0.0), (
+        "Y_tilde was not perturbed by the enabled outcome blur."
+    )
+    assert torch.equal(idx_real, idx_fake)
+
+    # (b) Under a DIFFERENT noise draw the outcome channel changes but X_tilde does
+    #     not: the covariate signature is independent of the instance-noise draw.
+    torch.manual_seed(9999)
+    batch_fake_alt, _ = extract_ego_batch(
+        roots=roots, ego_cache=ego_cache, X=X, Y=Y, norm_stats=norm_stats,
+        instance_noise=blur_cfg, generator_step=5, batch_role="fake",
+    )
+    assert torch.equal(batch_real.x[:, 0], batch_fake_alt.x[:, 0]), (
+        "X_tilde changed under a different noise draw; covariates were perturbed."
+    )
+    assert torch.any((batch_real.x[:, 1] - batch_fake_alt.x[:, 1]).abs() > 0.0), (
+        "Independent noise draws produced identical Y_tilde; blur is not random."
+    )

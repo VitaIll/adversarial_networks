@@ -1,7 +1,8 @@
 """Monte Carlo orchestration over the adversarial estimation engine.
 
 :class:`MonteCarloRunner` drives many independent estimation realisations on a
-*shared* :class:`~src.ego.EgoSubstrate`, handling everything that is not the
+*shared* :class:`~adversarial_networks.ego.EgoSubstrate`, handling everything that
+is not the
 estimation itself: deterministic per-realisation seed streams, resume from a
 partial run, durable per-realisation logging (CSV rows + per-step ``.npz``),
 provenance (config hash, library versions, git SHA), and periodic visualisation.
@@ -87,7 +88,7 @@ class RealizationResult:
 
     Attributes:
         realization: Realisation index.
-        result: The engine's :class:`~src.contracts.EstimationResult`.
+        result: The engine's :class:`~adversarial_networks.contracts.EstimationResult`.
         seeds: The four derived seeds for this realisation.
         init_params: The sampled initial structural parameters.
         elapsed_seconds: Wall-clock time for the realisation.
@@ -130,7 +131,7 @@ class MonteCarloRunner:
     """Orchestrates repeated estimation realisations over a shared substrate.
 
     Args:
-        substrate: The shared :class:`~src.ego.EgoSubstrate` (built once).
+        substrate: The shared :class:`~adversarial_networks.ego.EgoSubstrate` (built once).
         n_realizations: Number of realisations to run.
         master_seed: Master seed for the per-realisation seed streams.
         observed_factory: Builds the observed outcome ``Y_obs`` for a realisation.

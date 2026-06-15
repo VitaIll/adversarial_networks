@@ -32,6 +32,9 @@ OPTIMAL_DISC_LOSS = 2.0 * math.log(2.0)
 OPTIMAL_GEN_LOSS = math.log(2.0)
 """Theoretical (non-saturating) generator loss at the population optimum ≈ 0.693."""
 
+OPTIMAL_GEN_LOSS_SATURATING = -math.log(2.0)
+"""Theoretical saturating generator loss ``E[log(1 - D)]`` at ``D = 1/2`` ≈ -0.693."""
+
 
 # --------------------------------------------------------------------- losses
 def _check_logits(name: str, logits: Tensor) -> None:
@@ -131,6 +134,8 @@ def check_gan_convergence(
     min_steps: int | None = None,
     std_d_max: float | None = None,
     std_g_max: float | None = None,
+    *,
+    gen_optimum: float = OPTIMAL_GEN_LOSS,
 ) -> tuple[bool, float, float]:
     """Check whether the minimax losses have stabilised near equilibrium.
 
@@ -139,10 +144,14 @@ def check_gan_convergence(
         loss_g_history: Per-step generator loss history.
         window: Rolling mean window size.
         delta_d: Absolute tolerance around :data:`OPTIMAL_DISC_LOSS` (``2 log 2``).
-        delta_g: Absolute tolerance around :data:`OPTIMAL_GEN_LOSS` (``log 2``).
+        delta_g: Absolute tolerance around ``gen_optimum``.
         min_steps: Optional earliest step where convergence can be declared.
         std_d_max: Optional upper bound for the rolling discriminator-loss std.
         std_g_max: Optional upper bound for the rolling generator-loss std.
+        gen_optimum: Theoretical generator-loss target the rolling generator mean
+            is compared against. Defaults to :data:`OPTIMAL_GEN_LOSS` (``log 2``,
+            the non-saturating optimum); pass :data:`OPTIMAL_GEN_LOSS_SATURATING`
+            (``-log 2``) for the saturating loss.
 
     Returns:
         Tuple ``(converged, rolling_mean_d, rolling_mean_g)``; the rolling means
@@ -185,7 +194,7 @@ def check_gan_convergence(
     std_g = math.sqrt(max(0.0, var_g))
 
     d_ok = abs(rolling_d - OPTIMAL_DISC_LOSS) < delta_d
-    g_ok = abs(rolling_g - OPTIMAL_GEN_LOSS) < delta_g
+    g_ok = abs(rolling_g - gen_optimum) < delta_g
     if std_d_max is not None:
         d_ok = d_ok and (std_d <= std_d_max)
     if std_g_max is not None:
@@ -197,19 +206,24 @@ def check_gan_convergence(
 def instance_noise_taus(
     instance_noise: InstanceNoiseConfigLike | None,
     generator_step: int,
-) -> tuple[float, float]:
-    """Compute the scheduled blur intensity (normalised units) for a step.
+) -> float:
+    """Compute the scheduled outcome-blur intensity (normalised units) for a step.
+
+    The instance-noise stabiliser (Section 4.2) perturbs the *outcome* coordinates
+    only; covariates ``X`` are the theta-independent conditioning signature and are
+    never blurred. This returns the single outcome blur std ``tau_y`` after applying
+    the configured annealing schedule to ``tau_y0``.
 
     Args:
         instance_noise: Instance-noise configuration. If ``None`` or disabled,
-            returns ``(0.0, 0.0)``.
+            returns ``0.0``.
         generator_step: Outer generator step counter (0- or 1-based).
 
     Returns:
-        ``(tau_x, tau_y)`` in normalised units.
+        The blur std ``tau_y`` in normalised units.
     """
     if instance_noise is None or not bool(instance_noise.enabled):
-        return 0.0, 0.0
+        return 0.0
 
     step = max(0, int(generator_step))
     schedule = str(instance_noise.schedule)
@@ -236,11 +250,17 @@ def instance_noise_taus(
             if step <= anneal_steps:
                 frac = 1.0 - (float(step) / float(anneal_steps))
                 return max(min_tau, tau0 * frac)
-            return max(min_tau, min_tau)
-        # Exponential annealing with decay derived from anneal_steps.
+            return min_tau
+        # Exponential annealing with decay derived from anneal_steps. The continuous
+        # exp decay only asymptotes to min_tau (never reaches it at a finite step), so
+        # a finished anneal would otherwise leave a tiny residual blur (~1e-35) that the
+        # strict config guard (_assert_blur_anneals_to_zero) rejects and that targets a
+        # criterion the consistency theorem does not (IZ Sec 4.2 needs sigma -> 0). Snap
+        # to exactly min_tau once step >= anneal_steps, mirroring the linear branch's
+        # exact-floor behaviour so a completed exp anneal reaches min_tau exactly.
+        if step >= anneal_steps:
+            return min_tau
         tau_decay = max(1.0, float(anneal_steps) / 5.0)
         return max(min_tau, tau0 * math.exp(-float(step) / tau_decay))
 
-    tau_x = _tau_at_step(float(instance_noise.tau_x0))
-    tau_y = _tau_at_step(float(instance_noise.tau_y0))
-    return tau_x, tau_y
+    return _tau_at_step(float(instance_noise.tau_y0))

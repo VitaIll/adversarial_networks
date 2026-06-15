@@ -4,9 +4,11 @@ The estimator stops when two model-agnostic conditions hold simultaneously over 
 trailing window:
 
 1. **Loss-band convergence** — the rolling-mean discriminator and structural
-   losses sit within tolerance of their theoretical equilibrium values
-   ``2 log 2`` and ``log 2`` (``D* ≡ 1/2``), with bounded rolling std. This reuses
-   the tested :func:`~src.utils.check_gan_convergence`.
+   losses sit within tolerance of their theoretical equilibrium values at
+   ``D* ≡ 1/2`` (discriminator ``2 log 2``; generator ``log 2`` for the
+   non-saturating loss or ``-log 2`` for the saturating loss), with bounded
+   rolling std. This reuses the tested
+   :func:`~adversarial_networks.core.objective.check_gan_convergence`.
 2. **Parameter stabilisation** — every estimated structural parameter has a
    trailing-window range (max - min) within its tolerance. Unlike the original
    script (which hard-codes ``beta``/``gamma``/``sigma_sq``), this generalises to
@@ -22,7 +24,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from .core.objective import check_gan_convergence
+from .core.objective import (
+    OPTIMAL_GEN_LOSS,
+    OPTIMAL_GEN_LOSS_SATURATING,
+    check_gan_convergence,
+)
 from .estimator_config import EstimatorConfig
 
 
@@ -97,6 +103,11 @@ class StoppingRule:
             min_steps=self._config.min_steps,
             std_d_max=self._config.convergence_std_d_max,
             std_g_max=self._config.convergence_std_g_max,
+            gen_optimum=(
+                OPTIMAL_GEN_LOSS
+                if self._config.nonsaturating
+                else OPTIMAL_GEN_LOSS_SATURATING
+            ),
         )
         params_stable = self._params_stable(param_history)
         return StoppingDecision(

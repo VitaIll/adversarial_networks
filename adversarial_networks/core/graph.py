@@ -30,8 +30,12 @@ def row_stochastic_weights(edge_index: Tensor, num_nodes: int) -> Tensor:
         ``float32``, on the same device as ``edge_index``. For each node with
         nonzero degree, the row sums satisfy ``sum_j W[i, j] = 1.0``; its nonzero
         entries are ``1/degree_i`` on the graph edges (so the *indices are the
-        adjacency* and the *values encode the degree* — a general aggregate
-        ``sum_j a_ij g(Y_j)`` is recoverable from ``W``).
+        adjacency* and the *values encode the degree*). ``W`` therefore carries the
+        topology — the neighbour mean ``W @ g(Y)`` and any *degree-weighted* sum
+        (e.g. the raw neighbour sum ``deg_i * (W @ g(Y))``) are recoverable from it;
+        a general aggregate ``sum_j a_ij g(Y_j)`` with user-supplied per-edge weights
+        ``a_ij`` is computed from ``W``'s edge list (``indices()``) plus those
+        weights (the ``a_ij`` themselves are not encoded in ``W``).
 
     Raises:
         TypeError: If ``edge_index`` does not have ``torch.long`` dtype.

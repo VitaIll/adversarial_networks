@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Paper-fidelity audit & corrections
+
+Audited the engine against both source papers (Illichmann–Zacchia and the finite-moment
+companion note) via a multi-agent actor/critic loop and corrected every deviation until an
+adversarial critic found no deficiencies. The *default* estimator previously optimised a
+different criterion than the theorems characterise; it now matches them, and the framework
+is general enough to estimate any model satisfying the theorem conditions.
+
+- **Adversarial criterion (C6)**: the discriminator clips `D` to `[η, 1−η]` by default
+  (gradient-preserving soft `c·tanh` logit bound) and is now a function of a *single* ego
+  object — `BatchNorm` (which leaked minibatch composition into `D`) replaced by per-node
+  `LayerNorm`; the GIN trunk is spectral-normed (finite `L_D` under bounded degree A1/G2).
+- **Instance noise (§4.2)**: perturbs the *outcome* coordinates only (the covariate-`X`
+  blur channel and the asymmetric `apply_to` option were theory violations — removed; blur
+  is always symmetric on observed and simulated objects) and **anneals to exactly zero
+  across the whole tail-averaging window** (shipped/`recovery_default` schedules fixed; the
+  container, `from_configs`, and estimator runtime guards now agree). The loss-band
+  convergence check is saturating-loss aware.
+- **Generality**: multivariate covariates `d_x ≥ 1` end to end (built-ins stay scalar; the
+  scalar path is bit-identical); `check_model` takes an `interaction_radius` `r₀ ≥ 1`
+  (footnote 5), validates model inputs up front, and gained a degenerate-probe guard;
+  disjoint root sampling defaults its exclusion radius to `2k` (vertex-disjoint egos,
+  footnote 26); the row-stochastic `W` exposes the edge list/degree so a custom
+  `peer_aggregate` can implement `Σ aᵢⱼ g(Yⱼ)` (Example 3).
+- **Observability / boundaries**: `picard`/`newton`/`solve_equilibrium` return a
+  `SolveResult` carrying `converged`/`residual`; iteration-cap, implicit-adjoint
+  non-convergence, and sampler-shortfall conditions surface as warnings +
+  `EstimationResult.extras`; the Newton diagonal Jacobian and user-hook outputs are
+  validated at the boundary; the implicit adjoint has its own scale-invariant tolerance/cap.
+  New `estimate_branching` / `moment_condition_margin` surface the finite-moment condition
+  `ρ̄ᵖλ < 1` (and the consistency rate) as ensemble/rate observability (not a per-fit gate).
+- **Recovery**: `recovery_default` enables real learning-rate decay (`lr_g_decay_factor=0.5`)
+  — required because annealing the blur to zero re-exposes a late-training overshoot that the
+  old permanent blur had masked; the corrected, paper-faithful criterion recovers
+  (β≈0.38, γ≈1.43 vs. truth 0.4/1.5 at the 10k fast scale).
+- **Datasets / docs / tests**: heavy-tailed (λ=∞) LFR configurations are flagged and the LFR
+  degree/community caps are forwarded to NetworkX; the design docs were reconciled to the
+  code (removed several over-claims); the three example notebooks were migrated to the
+  current API. Test suite **113 → 206** (plus a `slow` end-to-end recovery gate), with
+  regression tests for every correction above.
+
 ### Repository hygiene & reorganization
 - **Licensing/packaging**: added a real `LICENSE` file (MIT) backing the `pyproject` declaration and ensured it
   ships in built distributions via `[tool.setuptools] license-files`; single-sourced the version through
@@ -50,7 +91,7 @@ public API and a separated fast computational core.
   `NotFittedError`, clone-safety, receptive-field guard, and the `MinimaxStepContext`
   gradient-transform seam (future Fisher / standard-error milestone). The verified loop
   is the free function `_run_minimax`, shared by `fit` and `MonteCarloRunner`.
-- **Curated public surface**: ~24 framework-first names; advanced machinery
+- **Curated public surface**: ~26 framework-first names; advanced machinery
   (`EgoSubstrate`, `RootSampler`, `losses`, `core.*`) reachable from its submodule.
 - **`io_utils`** generality fix: deleted the dead `save_realization_history`; the loader
   now coerces CSV columns by suffix (model-agnostic, not hard-coded `beta/gamma/sigma_sq`).

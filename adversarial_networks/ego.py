@@ -24,6 +24,7 @@ References:
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import torch
@@ -33,6 +34,44 @@ from torch_geometric.utils import k_hop_subgraph, to_undirected
 from .core.ego_features import EgoCache, EgoCacheEntry, extract_ego_batch
 from .core.graph import adjacency_lists_from_edge_index, row_stochastic_weights
 from .sampling import RootSampler, sample_roots_tensor
+
+
+def _sampler_effective_exclusion_r(root_sampler: RootSampler) -> int:
+    """Strictest exclusion radius a disjoint sampler enforces between roots.
+
+    For the single-radius modes this is ``exclusion_r``; for ``disjoint_relax`` it
+    is the *largest* radius the relax ladder ever attempts (the best-case packing,
+    hence the best-case ego independence the configuration can deliver). The caller
+    is expected to have already checked ``root_sampler.mode != "uniform"``.
+    """
+    if root_sampler.mode == "disjoint_relax":
+        return max(root_sampler.disjoint_relax_sequence)
+    return root_sampler.exclusion_r
+
+
+def _warn_if_egos_overlap(root_sampler: RootSampler, k: int) -> None:
+    """Warn once if a disjoint sampler's exclusion radius cannot make k-egos disjoint.
+
+    Two radius-``k`` ego balls are vertex-disjoint iff the distance between their
+    centres exceeds ``2k``; the packer only guarantees ``dist(u, v) > exclusion_r``.
+    So when the effective exclusion radius is ``< 2k`` the sampled radius-``k`` egos
+    can share vertices and the near-independence the disjoint modes rely on does not
+    hold. ``uniform`` mode does no packing and is exempt.
+    """
+    if root_sampler.mode == "uniform":
+        return
+    effective_r = _sampler_effective_exclusion_r(root_sampler)
+    required_r = 2 * int(k)
+    if effective_r < required_r:
+        warnings.warn(
+            f"Disjoint root sampler (mode={root_sampler.mode!r}) has effective "
+            f"exclusion radius {effective_r} < 2*k = {required_r} (k={int(k)}); the "
+            "sampled radius-k egos are NOT vertex-disjoint (they can share vertices), "
+            "so the near-independence the disjoint packing relies on does not hold. "
+            f"Set exclusion_r >= {required_r} for vertex-disjoint egos.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import networkx as nx
@@ -49,13 +88,17 @@ class EgoSubstrate:
         num_nodes: Number of nodes ``n`` in the (sanitised) graph.
         edge_index: Undirected ``(2, num_edges)`` long edge index on ``device``.
         W: Coalesced sparse-COO row-stochastic ``(n, n)`` float32 matrix.
-        X: Dense ``(n,)`` float covariate vector.
+        X: Dense ``(n,)`` (scalar covariate) or ``(n, d_x)`` (vector covariate) float
+            covariate tensor.
+        d_x: Number of covariate columns (``X.shape[1]`` for a 2-D ``X``, else ``1``).
         ego_cache: Mapping ``root -> (subset, sub_edge_index, root_pos)`` for every
             node, with ``k``-hop induced subgraphs.
-        root_sampler: Configured :class:`~src.root_sampling.RootSampler`.
+        root_sampler: Configured :class:`~adversarial_networks.sampling.RootSampler`.
         k: Ego radius used to build the cache.
-        mu_X: Mean of ``X`` (covariate normalisation centre).
-        sigma_X: Population std of ``X`` (covariate normalisation scale, > 0).
+        mu_X: Mean of ``X`` (covariate normalisation centre): a scalar ``float`` for a
+            1-D ``X``, a per-column ``(d_x,)`` tensor for a 2-D ``X``.
+        sigma_X: Population std of ``X`` (covariate normalisation scale, > 0): a scalar
+            ``float`` for a 1-D ``X``, a per-column ``(d_x,)`` tensor for a 2-D ``X``.
         device: Torch device hosting the tensors.
     """
 
@@ -68,11 +111,13 @@ class EgoSubstrate:
         ego_cache: EgoCache,
         root_sampler: RootSampler,
         k: int,
-        mu_X: float | None = None,
-        sigma_X: float | None = None,
+        mu_X: float | Tensor | None = None,
+        sigma_X: float | Tensor | None = None,
     ) -> None:
-        if not isinstance(X, Tensor) or X.ndim != 1 or not torch.is_floating_point(X):
-            raise TypeError("X must be a 1-D floating-point tensor of shape (n,).")
+        if not isinstance(X, Tensor) or X.ndim not in (1, 2) or not torch.is_floating_point(X):
+            raise TypeError("X must be a floating-point tensor of shape (n,) or (n, d_x).")
+        if X.ndim == 2 and int(X.shape[1]) < 1:
+            raise ValueError("X must have at least one covariate column (d_x >= 1).")
         num_nodes = int(X.shape[0])
         if num_nodes <= 0:
             raise ValueError("X must be non-empty.")
@@ -106,18 +151,46 @@ class EgoSubstrate:
         self.ego_cache = ego_cache
         self.root_sampler = root_sampler
         self.k = int(k)
+        # One-time vertex-disjointness check: a disjoint sampler only yields
+        # vertex-disjoint radius-k egos when its exclusion radius is >= 2k (fn. 26).
+        # This catches a sampler built directly by a user and handed in here.
+        _warn_if_egos_overlap(root_sampler, self.k)
         self.device = X.device
+        self.d_x = int(X.shape[1]) if X.ndim == 2 else 1
 
-        if sigma_X is None:
-            sigma_X = float(X.std(unbiased=False).item())
-        if mu_X is None:
-            mu_X = float(X.mean().item())
-        if sigma_X <= 1e-12:
-            raise ValueError(
-                f"sigma_X must be strictly positive (X is near-constant), got {sigma_X}."
+        if X.ndim == 1:
+            # Scalar-covariate path (d_x = 1): scalar float stats, kept bit-identical.
+            if sigma_X is None:
+                sigma_X = float(X.std(unbiased=False).item())
+            if mu_X is None:
+                mu_X = float(X.mean().item())
+            if float(sigma_X) <= 1e-12:
+                raise ValueError(
+                    f"sigma_X must be strictly positive (X is near-constant), got {sigma_X}."
+                )
+            self.mu_X: float | Tensor = float(mu_X)
+            self.sigma_X: float | Tensor = float(sigma_X)
+        else:
+            # Vector-covariate path: per-column (d_x,) centre/scale on X's device.
+            mu_vec = X.mean(dim=0) if mu_X is None else torch.as_tensor(
+                mu_X, dtype=X.dtype, device=X.device
             )
-        self.mu_X = float(mu_X)
-        self.sigma_X = float(sigma_X)
+            sigma_vec = X.std(dim=0, unbiased=False) if sigma_X is None else torch.as_tensor(
+                sigma_X, dtype=X.dtype, device=X.device
+            )
+            if mu_vec.ndim != 1 or int(mu_vec.shape[0]) != self.d_x:
+                raise ValueError(f"mu_X must have length d_x={self.d_x}.")
+            if sigma_vec.ndim != 1 or int(sigma_vec.shape[0]) != self.d_x:
+                raise ValueError(f"sigma_X must have length d_x={self.d_x}.")
+            near_constant = (sigma_vec <= 1e-12).nonzero(as_tuple=True)[0]
+            if int(near_constant.numel()) > 0:
+                cols = [int(c) for c in near_constant.tolist()]
+                raise ValueError(
+                    f"sigma_X must be strictly positive per column (X near-constant in "
+                    f"column(s) {cols})."
+                )
+            self.mu_X = mu_vec.detach()
+            self.sigma_X = sigma_vec.detach()
         self.sanitization_report: dict[str, int] = {}
         # Original-node positions kept after sanitisation (set by from_networkx);
         # lets a caller (NetworkData) re-index an outcome vector identically to X.
@@ -143,7 +216,8 @@ class EgoSubstrate:
         Args:
             edge_index: ``(2, num_edges)`` long edge index. If ``ensure_undirected``
                 is true (default) it is symmetrised.
-            X: ``(n,)`` float covariate vector defining the node count and device.
+            X: ``(n,)`` (scalar covariate) or ``(n, d_x)`` (vector covariate) float
+                covariate tensor defining the node count and device.
             k: Ego radius for the cache (must match the discriminator depth).
             root_sampler: Pre-constructed sampler whose ``num_nodes`` equals ``n``.
             ensure_undirected: Symmetrise ``edge_index`` before building ``W``.
@@ -154,8 +228,8 @@ class EgoSubstrate:
         Raises:
             TypeError, ValueError: On any precondition violation.
         """
-        if not isinstance(X, Tensor) or X.ndim != 1 or not torch.is_floating_point(X):
-            raise TypeError("X must be a 1-D floating-point tensor of shape (n,).")
+        if not isinstance(X, Tensor) or X.ndim not in (1, 2) or not torch.is_floating_point(X):
+            raise TypeError("X must be a floating-point tensor of shape (n,) or (n, d_x).")
         num_nodes = int(X.shape[0])
         device = X.device
 
@@ -185,10 +259,10 @@ class EgoSubstrate:
         *,
         k: int,
         root_sampler_mode: str = "uniform",
-        exclusion_r: int = 0,
+        exclusion_r: int | None = None,
         disjoint_restarts_k: int = 1,
         disjoint_min_batch: int | None = None,
-        disjoint_relax_sequence: tuple[int, ...] = (0,),
+        disjoint_relax_sequence: tuple[int, ...] | None = None,
         disjoint_fallback: str = "best",
         seed: int = 0,
     ) -> EgoSubstrate:
@@ -203,13 +277,24 @@ class EgoSubstrate:
         Args:
             graph: Input NetworkX graph; nodes are taken in sorted order to align
                 with ``X``.
-            X: ``(N,)`` float covariates aligned to ``sorted(graph.nodes())``.
+            X: ``(N,)`` or ``(N, d_x)`` float covariates aligned to
+                ``sorted(graph.nodes())`` (rows are re-indexed onto the kept nodes).
             k: Ego radius.
-            root_sampler_mode: One of the :class:`~src.root_sampling.RootSampler`
-                modes.
-            exclusion_r, disjoint_restarts_k, disjoint_min_batch,
-            disjoint_relax_sequence, disjoint_fallback: Disjoint-sampler controls
-                (ignored for ``"uniform"``).
+            root_sampler_mode: One of the
+                :class:`~adversarial_networks.sampling.RootSampler` modes.
+            exclusion_r: Exclusion radius for the disjoint modes. When left at its
+                default (``None``) in a disjoint mode it derives the *vertex-disjoint*
+                radius ``2 * k`` (two radius-``k`` ego balls are disjoint iff their
+                centres are more than ``2k`` apart; fn. 26), so the sampled egos are
+                near-independent. Ignored for ``"uniform"``. Passing an explicit value
+                ``< 2 * k`` in a disjoint mode trades independence for batch fill and
+                emits a ``RuntimeWarning`` (the egos can then share vertices).
+            disjoint_relax_sequence: Radius ladder for ``disjoint_relax``. When left at
+                its default (``None``) in ``disjoint_relax`` mode it derives ``(2 * k,)``
+                — the vertex-disjoint radius. Radii below ``2 * k`` trade independence
+                for batch fill (and warn, as above).
+            disjoint_restarts_k, disjoint_min_batch, disjoint_fallback: Remaining
+                disjoint-sampler controls (ignored for ``"uniform"``).
             seed: Seed for the sampler RNG.
 
         Returns:
@@ -222,8 +307,21 @@ class EgoSubstrate:
         """
         import networkx as nx
 
-        if not isinstance(X, Tensor) or X.ndim != 1 or not torch.is_floating_point(X):
-            raise TypeError("X must be a 1-D floating-point tensor.")
+        is_disjoint = root_sampler_mode != "uniform"
+        # k-aware defaults: an unset radius in a disjoint mode becomes the
+        # vertex-disjoint radius 2*k. Outside disjoint modes the radii are inert,
+        # so an unset value is resolved to a harmless concrete RootSampler default.
+        resolved_exclusion_r = (
+            (2 * int(k) if is_disjoint else 0) if exclusion_r is None else int(exclusion_r)
+        )
+        resolved_relax_sequence = (
+            ((2 * int(k),) if is_disjoint else (0,))
+            if disjoint_relax_sequence is None
+            else tuple(int(radius) for radius in disjoint_relax_sequence)
+        )
+
+        if not isinstance(X, Tensor) or X.ndim not in (1, 2) or not torch.is_floating_point(X):
+            raise TypeError("X must be a floating-point tensor of shape (N,) or (N, d_x).")
         nodes_sorted = sorted(graph.nodes())
         if int(X.shape[0]) != len(nodes_sorted):
             raise ValueError(
@@ -263,13 +361,13 @@ class EgoSubstrate:
         sampler = RootSampler(
             num_nodes=num_nodes,
             mode=root_sampler_mode,  # type: ignore[arg-type]
-            exclusion_r=exclusion_r,
+            exclusion_r=resolved_exclusion_r,
             disjoint_restarts_k=disjoint_restarts_k,
             disjoint_min_batch=disjoint_min_batch,
-            disjoint_relax_sequence=disjoint_relax_sequence,
+            disjoint_relax_sequence=resolved_relax_sequence,
             disjoint_fallback=disjoint_fallback,  # type: ignore[arg-type]
             rng=np.random.default_rng(seed),
-            adjacency=adjacency if root_sampler_mode != "uniform" else None,
+            adjacency=adjacency if is_disjoint else None,
         )
         substrate = cls.from_edge_index(
             edge_index=edge_index, X=X_kept, k=k, root_sampler=sampler, ensure_undirected=False
@@ -288,7 +386,7 @@ class EgoSubstrate:
 
         Each entry is ``(subset, sub_edge_index, root_pos)`` with relabelled local
         node ids, matching the format consumed by
-        :func:`~src.utils.extract_ego_batch`.
+        :func:`~adversarial_networks.core.ego_features.extract_ego_batch`.
         """
         ego_cache: dict[int, EgoCacheEntry] = {}
         for root in range(num_nodes):
@@ -315,10 +413,11 @@ class EgoSubstrate:
         """
         return sample_roots_tensor(sampler=self.root_sampler, batch_size=batch_size, device=self.device)
 
-    def make_norm_stats(self, Y: Tensor) -> dict[str, float]:
+    def make_norm_stats(self, Y: Tensor) -> dict[str, float | Tensor]:
         """Compute the frozen normalisation stats ``{mu_X, sigma_X, mu_Y, sigma_Y}``.
 
-        The covariate stats are the substrate's fixed values; the outcome stats are
+        The covariate stats are the substrate's fixed values (scalar floats for a 1-D
+        ``X``, per-column ``(d_x,)`` tensors for a 2-D ``X``); the outcome stats are
         computed from the supplied (observed) outcome vector. These same stats
         normalise both real and simulated batches.
 
@@ -326,7 +425,8 @@ class EgoSubstrate:
             Y: ``(n,)`` float outcome vector (typically the observed ``Y_obs``).
 
         Returns:
-            Normalisation dictionary with strictly positive scales.
+            Normalisation dictionary with strictly positive scales. ``mu_Y``/``sigma_Y``
+            are floats; ``mu_X``/``sigma_X`` mirror the substrate (float or ``(d_x,)``).
 
         Raises:
             ValueError: If ``Y`` is the wrong shape or near-constant.
@@ -355,7 +455,8 @@ class EgoSubstrate:
     ) -> tuple[Batch, Tensor]:
         """Construct a rooted-ego PyG batch for the given roots and outcomes.
 
-        Thin, validated wrapper over :func:`~src.utils.extract_ego_batch` binding
+        Thin, validated wrapper over
+        :func:`~adversarial_networks.core.ego_features.extract_ego_batch` binding
         this substrate's ego cache and covariates.
 
         Args:
@@ -369,7 +470,7 @@ class EgoSubstrate:
 
         Returns:
             ``(batch, root_indices)`` as produced by
-            :func:`~src.utils.extract_ego_batch`.
+            :func:`~adversarial_networks.core.ego_features.extract_ego_batch`.
         """
         return extract_ego_batch(
             roots=roots,

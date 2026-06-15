@@ -9,7 +9,13 @@ modules import *from* here, never the reverse.
 from __future__ import annotations
 
 from .ego_features import EgoCache, EgoCacheEntry, NormStats, extract_ego_batch
-from .equilibrium import newton, picard, solve_equilibrium
+from .equilibrium import (
+    EquilibriumNotConverged,
+    SolveResult,
+    newton,
+    picard,
+    solve_equilibrium,
+)
 from .graph import (
     adjacency_lists_from_edge_index,
     normalize_adjacency,
@@ -25,6 +31,7 @@ from .neighborhoods import (
 from .objective import (
     OPTIMAL_DISC_LOSS,
     OPTIMAL_GEN_LOSS,
+    OPTIMAL_GEN_LOSS_SATURATING,
     check_gan_convergence,
     discriminator_loss,
     generator_nonsaturating_loss,
@@ -38,6 +45,8 @@ __all__ = [
     "picard",
     "newton",
     "solve_equilibrium",
+    "SolveResult",
+    "EquilibriumNotConverged",
     # graph
     "row_stochastic_weights",
     "adjacency_lists_from_edge_index",
@@ -61,6 +70,7 @@ __all__ = [
     "instance_noise_taus",
     "OPTIMAL_DISC_LOSS",
     "OPTIMAL_GEN_LOSS",
+    "OPTIMAL_GEN_LOSS_SATURATING",
     # types
     "InstanceNoiseConfigLike",
 ]

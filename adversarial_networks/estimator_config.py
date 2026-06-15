@@ -9,8 +9,10 @@ the engine has one clean ``fit()`` surface: the same estimator runs under any
 experiment and any runner.
 
 For backwards compatibility, :meth:`EstimatorConfig.from_configs` derives an
-``EstimatorConfig`` from the existing :class:`~src.config.ExperimentConfig` and
-:class:`~src.config.MonteCarloConfig`, so the refactored Monte Carlo pipeline and
+``EstimatorConfig`` from the existing
+:class:`~adversarial_networks.config.ExperimentConfig` and
+:class:`~adversarial_networks.config.MonteCarloConfig`, so the refactored Monte
+Carlo pipeline and
 notebooks reuse their current configuration objects unchanged.
 """
 
@@ -143,13 +145,21 @@ class EstimatorConfig:
         ``beta_cap=0.85``, discriminator ``hidden_dim=12``/``logit_clip=4.0``/``num_layers=2``)
         over multiple seeds. **The recovery recipe also needs the instance-noise blur**
         — pair this config with
-        ``InstanceNoiseConfig(enabled=True, tau_x0=1.0, tau_y0=1.0, schedule="linear", anneal_steps=2000)``:
-        the slow (2000-step) blur anneal keeps the discriminator from sharpening while
-        the ``max_steps=1200`` horizon stops before the late-training overshoot, so the
-        tail-averaged estimate sits near the truth. Recovery is rough at this fast scale
-        (``beta`` — the social multiplier — is biased low; ``sigma^2`` is biased at finite
-        ``n`` and is not asserted); the asymptotic (paper-scale) regime recovers tightly.
-        The recovery test asserts ``beta``/``gamma`` within the observed spread.
+        ``InstanceNoiseConfig(enabled=True, tau_y0=1.0, schedule="linear", anneal_steps=1000, min_tau=0.0)``:
+        the outcomes-only blur anneals over 1000 steps and then runs the last ~200 steps
+        of the ``max_steps=1200`` horizon at ``sigma=0`` (so the estimator targets the
+        original, unblurred criterion and the tail-averaged estimate is consistent).
+
+        Because the blur anneals to zero, the discriminator sharpens late in training; a
+        constant structural learning rate then overshoots (``gamma`` drifts up and ``beta``
+        collapses once ``sigma=0``). The structural learning rate is therefore *decayed*
+        (``lr_g_decay_factor=0.5`` at the four milestones) so the optimiser settles as the
+        criterion sharpens — this is what makes the paper-faithful (annealed-to-zero,
+        clipped, outcomes-only) criterion recover accurately. On the calibration study
+        (10k BA, seed 0) it lands ``beta ~ 0.38`` and ``gamma ~ 1.43`` (truth ``0.4``/``1.5``);
+        ``sigma^2`` is biased at finite ``n`` and is not asserted. The recovery test asserts
+        ``beta``/``gamma`` within the observed fast-scale spread; the asymptotic (paper-scale)
+        regime recovers tightly.
         """
         return cls(
             max_steps=1200,
@@ -160,7 +170,7 @@ class EstimatorConfig:
             lr_g=3e-3,
             grad_clip_norm=10.0,
             lr_g_decay_steps=(220, 420, 620, 780),
-            lr_g_decay_factor=1.0,
+            lr_g_decay_factor=0.5,
             convergence_window=100,
             convergence_delta_d=0.01,
             convergence_delta_g=0.01,
@@ -189,9 +199,25 @@ class EstimatorConfig:
         gradient clip comes from ``MonteCarloConfig.grad_clip_norm``), so the
         refactored pipeline reproduces the existing training dynamics exactly.
         """
+        # Local import (the module otherwise references config only under TYPE_CHECKING):
+        # keeps the runtime dependency direction one-way and order-independent.
+        from .config import assert_blur_anneals_to_zero_by_tail_window
+
         training = experiment.training
         max_steps = int(monte_carlo.max_steps) if monte_carlo.max_steps is not None else int(training.n_steps)
         min_steps = int(monte_carlo.min_steps) if monte_carlo.min_steps is not None else 0
+
+        # Validate the blur against the RESOLVED runner horizon at config-assembly time. The
+        # ExperimentConfig/EffortExperimentConfig __post_init__ guard only sees the standalone
+        # training.n_steps, but the runner's estimation horizon is monte_carlo.max_steps (which
+        # can be smaller), and the point estimate is the tail average — so the blur must reach
+        # zero before the tail-averaging window of THIS horizon, else the runner targets a
+        # residually-blurred (non-consistent) criterion despite a passing container guard
+        # (D8-REG-blur-guard-wrong-horizon). tail_window matches the estimator's runtime guard.
+        tail_window = max(int(monte_carlo.convergence_window), int(monte_carlo.stability_window))
+        assert_blur_anneals_to_zero_by_tail_window(
+            experiment.instance_noise, max_steps, tail_window, "EstimatorConfig.from_configs"
+        )
         overrides = (
             ("gamma", float(monte_carlo.stability_gamma_range_tol)),
             ("sigma_sq", float(monte_carlo.stability_sigma_sq_range_tol)),

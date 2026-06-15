@@ -8,6 +8,70 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Literal
 
+from .core.objective import instance_noise_taus
+
+# Representative tail-averaging window for the standalone-``n_steps`` container guard.
+# The point estimate is the mean of the trailing ``max(convergence_window, stability_window)``
+# steps; the container ``__post_init__`` does not see the runner's ``MonteCarloConfig`` (and
+# hence not its windows), so it validates against the ``EstimatorConfig`` field defaults
+# (``convergence_window=100``, ``stability_window=30``) — i.e. ``max(100, 30) = 100``. This
+# keeps the container guard's predicate identical to the authoritative tail-window gate
+# (``EstimatorConfig.from_configs`` / the estimator runtime warning) so the two never disagree
+# on the same config at the same horizon (D1-REG-container-blur-guard-terminal-vs-tailwindow).
+DEFAULT_TAIL_WINDOW = 100
+
+
+def _assert_blur_anneals_to_zero(
+    instance_noise: InstanceNoiseConfig, n_steps: int, container: str
+) -> None:
+    """Hard config-construction check: an enabled blur must reach zero before the tail window.
+
+    IZ Sec 4.2 requires ``sigma_noise(s) -> 0`` (``min_tau=0``) so the perturbed criterion
+    converges to the original (the Thm 2 consistency target), and the point estimate is the
+    tail average over the trailing ``tail_window`` steps — so the load-bearing horizon is the
+    FIRST step of that window, not the terminal step. This is the SAME tail-window-start
+    predicate enforced by :func:`assert_blur_anneals_to_zero_by_tail_window` (used by
+    ``EstimatorConfig.from_configs``) and the estimator's runtime residual-blur warning; the
+    container ``__post_init__`` only sees the standalone ``training.n_steps``, so it validates
+    that horizon with the representative :data:`DEFAULT_TAIL_WINDOW`. Delegating keeps the
+    construction-time verdict consistent with ``from_configs`` and the runtime guard rather than
+    enforcing a weaker terminal-step check (D1-REG-container-blur-guard-terminal-vs-tailwindow).
+    """
+    assert_blur_anneals_to_zero_by_tail_window(
+        instance_noise, int(n_steps), DEFAULT_TAIL_WINDOW, container
+    )
+
+
+def assert_blur_anneals_to_zero_by_tail_window(
+    instance_noise: InstanceNoiseConfig, max_steps: int, tail_window: int, container: str
+) -> None:
+    """Config-assembly check: an enabled blur must reach zero before the tail-averaging window.
+
+    The point estimate is the tail average over the trailing ``tail_window`` steps (see the
+    estimator's ``_finalize``), so the relevant horizon is the FIRST step of that window —
+    ``tail_start_step = max(1, max_steps - tail_window + 1)`` — not the terminal step: a blur
+    still positive at the window start contaminates the average even if it reaches zero by
+    ``max_steps``. This mirrors the estimator's runtime residual-blur warning (which keys off
+    exactly that step) but raises at config-assembly time, so the RESOLVED runner horizon
+    (``MonteCarloConfig.max_steps``) is validated — not only the standalone ``training.n_steps``
+    the container ``__post_init__`` sees (D8-REG-blur-guard-wrong-horizon).
+    """
+    if not bool(instance_noise.enabled):
+        return
+    tail_start_step = max(1, int(max_steps) - int(tail_window) + 1)
+    residual = instance_noise_taus(instance_noise, generator_step=tail_start_step)
+    if residual > 0.0:
+        raise ValueError(
+            f"{container}: instance_noise blur does not reach zero by the start of the "
+            f"tail-averaging window (residual tau_y={residual:.4g} at step {tail_start_step}="
+            f"max_steps-tail_window+1, tail_window={int(tail_window)}, max_steps={int(max_steps)}, "
+            f"schedule={instance_noise.schedule!r}, anneal_steps={instance_noise.anneal_steps}, "
+            f"min_tau={instance_noise.min_tau}); the estimator would target a residually-blurred "
+            "(non-consistent) criterion and the tail-averaged estimate would be biased. Use the "
+            "linear schedule with min_tau=0.0 and anneal_steps<=max_steps-tail_window so the blur "
+            "reaches exactly zero before the tail-averaging window begins."
+        )
+
 
 @dataclass(frozen=True)
 class GraphConfig:
@@ -148,7 +212,17 @@ class ModelConfig:
     """Width of discriminator GNN/MLP layers (capacity vs. compute)."""
 
     logit_clip: float = 10.0
-    """Absolute clipping bound for discriminator logits to stabilize adversarial losses."""
+    """Soft logit clip ``c`` forwarded to the discriminator constructor **in the legacy
+    Monte Carlo experiment script only**.
+
+    This value is read solely by ``experiments/asymptotic_mc_experiment.py``, which passes
+    it as ``RootedMPNNDiscriminator(logit_clip=cfg.model.logit_clip)`` when it builds the
+    per-realisation discriminator. It is **not** a knob the live
+    :class:`~adversarial_networks.estimator.AdversarialEstimator` reads: that estimator
+    takes an already-constructed discriminator, which owns its own ``logit_clip`` (the
+    ``RootedMPNNDiscriminator`` default is ``5.0``). So this field governs the clip only on
+    the experiment-script path; constructing the estimator directly is unaffected by it.
+    """
 
     def __post_init__(self) -> None:
         """Validate configuration parameters."""
@@ -231,9 +305,6 @@ class TrainingConfig:
 
     relax_to_r2: bool = False
     """Legacy flag enabling a weaker `r=2` retry when greedy packing under-fills."""
-
-    mix_p_uniform: float = 0.0
-    """Probability of forcing a uniform draw even in disjoint modes."""
 
     def resolved_root_sampler_mode(
         self,
@@ -338,10 +409,6 @@ class TrainingConfig:
                 "disjoint_fallback must be one of {'uniform', 'best', 'raise'}, got "
                 f"{self.disjoint_fallback!r}"
             )
-        if not (0.0 <= self.mix_p_uniform <= 1.0):
-            raise ValueError(
-                f"mix_p_uniform must satisfy 0 <= p <= 1, got {self.mix_p_uniform}"
-            )
 
         resolved_mode = self.resolved_root_sampler_mode()
         if resolved_mode != "uniform":
@@ -358,13 +425,24 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class InstanceNoiseConfig:
-    """Optional discriminator-input blur (instance noise) controls."""
+    """Instance-noise controls: a blur applied to the **outcome** discriminator inputs.
+
+    The blur perturbs only the outcome coordinates ``Y`` (never the covariates ``X``,
+    which are the theta-independent conditioning signature) and anneals linearly to
+    ``min_tau`` over ``anneal_steps``; with the default ``min_tau=0.0`` the linear
+    schedule reaches exactly zero at any ``step >= anneal_steps``. The leaf default
+    ``anneal_steps=2000`` therefore reaches zero only at step 2000 — it does NOT on its
+    own guarantee zero blur before a consumer's horizon. The horizon guarantee is the
+    factories' / guards' responsibility: the shipped ``ExperimentConfig`` /
+    ``EffortExperimentConfig`` set ``anneal_steps <= n_steps - tail_window`` so the blur
+    reaches zero before the tail-averaging window and the estimator targets the original,
+    unblurred criterion (IZ Sec 4.2), and the construction/assembly guards
+    (``_assert_blur_anneals_to_zero`` / ``assert_blur_anneals_to_zero_by_tail_window``)
+    reject a bare config whose blur would still be positive at the tail-window start.
+    """
 
     enabled: bool = True
-    """Enable blur noise on discriminator inputs only (default: disabled)."""
-
-    tau_x0: float = 1.0
-    """Initial X blur std in normalized units (dimensionless)."""
+    """Enable outcome blur on discriminator inputs (default: enabled)."""
 
     tau_y0: float = 1.2
     """Initial Y blur std in normalized units (dimensionless)."""
@@ -376,15 +454,10 @@ class InstanceNoiseConfig:
     """Steps over which blur anneals; if 0, schedule behaves as constant."""
 
     min_tau: float = 0.0
-    """Lower bound for tau_x/tau_y during annealing."""
-
-    apply_to: Literal["both", "real_only"] = "both"
-    """Apply blur to both real/fake batches (default) or real batches only."""
+    """Lower bound for tau_y during annealing."""
 
     def __post_init__(self) -> None:
         """Validate instance-noise configuration parameters."""
-        if self.tau_x0 < 0.0:
-            raise ValueError(f"tau_x0 must be non-negative, got {self.tau_x0}")
         if self.tau_y0 < 0.0:
             raise ValueError(f"tau_y0 must be non-negative, got {self.tau_y0}")
         if self.schedule not in ("constant", "linear", "exp"):
@@ -398,10 +471,14 @@ class InstanceNoiseConfig:
             )
         if self.min_tau < 0.0:
             raise ValueError(f"min_tau must be non-negative, got {self.min_tau}")
-        if self.apply_to not in ("both", "real_only"):
+        # The schedule is a non-increasing decay from tau_y0 down to min_tau; a floor
+        # above the starting scale would silently RAISE the blur above tau_y0 (the
+        # paper's schedule never amplifies above sigma_0). Reject it at the boundary.
+        if self.min_tau > self.tau_y0:
             raise ValueError(
-                "apply_to must be 'both' or 'real_only', got "
-                f"{self.apply_to!r}"
+                f"min_tau ({self.min_tau}) must be <= tau_y0 ({self.tau_y0}); a floor "
+                "above the starting scale would raise the blur above tau_y0 (the decay "
+                "schedule is non-increasing from tau_y0)."
             )
 
 
@@ -494,9 +571,6 @@ class MonteCarloConfig:
     max_steps: int | None = 2000
     """Optional hard cap on generator steps per realization. ``None`` means unbounded."""
 
-    equilibrium_dwell_steps: int = 50
-    """Required consecutive in-band equilibrium steps before stopping."""
-
     stability_window: int = 30
     """Window length used to verify parameter stabilization before stopping."""
 
@@ -508,12 +582,6 @@ class MonteCarloConfig:
 
     stability_sigma_sq_range_tol: float = 0.1
     """Max allowed sigma_sq range over ``stability_window`` to treat sigma_sq as stable."""
-
-    adaptive_anneal_enabled: bool = False
-    """Whether to adaptively extend annealing when convergence has not been reached."""
-
-    adaptive_anneal_buffer_steps: int = 40
-    """Extra annealing horizon maintained ahead of current step in adaptive mode."""
 
     output_dir: str = "artifacts/mc_asymptotic"
     """Directory where Monte Carlo outputs are written."""
@@ -630,21 +698,19 @@ class MonteCarloConfig:
             raise ValueError(
                 f"max_steps must be >= min_steps, got {self.max_steps} < {self.min_steps}"
             )
-        if self.equilibrium_dwell_steps <= 0:
-            raise ValueError(
-                "equilibrium_dwell_steps must be positive, got "
-                f"{self.equilibrium_dwell_steps}"
-            )
         if self.stability_window <= 0:
             raise ValueError(
                 f"stability_window must be positive, got {self.stability_window}"
             )
         if self.max_steps is not None:
             min_start = int(self.min_steps) if self.min_steps is not None else 0
+            # Earliest step the engine's stopping rule can fire: the loss-band check
+            # needs max(convergence_window, min_steps) samples and the parameter-
+            # stability check needs stability_window samples (see StoppingRule).
             earliest_stop = max(
-                self.convergence_window + self.equilibrium_dwell_steps - 1,
+                self.convergence_window,
                 self.stability_window,
-                min_start + self.equilibrium_dwell_steps - 1,
+                min_start,
             )
             if self.max_steps < earliest_stop:
                 raise ValueError(
@@ -665,11 +731,6 @@ class MonteCarloConfig:
             raise ValueError(
                 "stability_sigma_sq_range_tol must be positive, got "
                 f"{self.stability_sigma_sq_range_tol}"
-            )
-        if self.adaptive_anneal_buffer_steps <= 0:
-            raise ValueError(
-                "adaptive_anneal_buffer_steps must be positive, got "
-                f"{self.adaptive_anneal_buffer_steps}"
             )
         if not self.output_dir.strip():
             raise ValueError("output_dir must be non-empty.")
@@ -708,6 +769,12 @@ class ExperimentConfig:
     init_params: InitParams
     """Initial values for trainable generator parameters."""
 
+    def __post_init__(self) -> None:
+        """Cross-component consistency: an enabled blur must anneal to zero by n_steps."""
+        _assert_blur_anneals_to_zero(
+            self.instance_noise, self.training.n_steps, "ExperimentConfig"
+        )
+
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
         return {
@@ -721,19 +788,50 @@ class ExperimentConfig:
 
     @classmethod
     def default(cls) -> ExperimentConfig:
-        """Create default configuration matching design doc specification."""
+        """Paper-scale reference configuration (LFR, ~250k nodes).
+
+        This composes the dataclass defaults — an LFR graph with
+        ``GraphConfig.n_nodes=250000`` — and describes the asymptotic, paper-scale
+        regime. The live runner driver (``experiments/asymptotic_mc_experiment.py``)
+        now dispatches its shared-substrate ``build_substrate`` on
+        ``cfg.graph.graph_type`` (building a capped LFR ensemble via
+        ``datasets._build_lfr_graph`` with this config's cap knobs for the ``'lfr'``
+        branch), so this ``default()`` is runnable by that driver (D8-06-R2) — at this
+        scale it is simply expensive. Use :meth:`mc_default` (a Barabasi-Albert,
+        10k-node fast-scale setup) to reproduce the cheaper runnable Monte Carlo study;
+        use this factory as the paper-scale reference. (The LFR ensemble is also
+        buildable via the dataset factories, e.g. ``make_linear_in_means(graph='lfr',
+        ...)`` — the ``AdversarialEstimator`` path.)
+
+        The instance-noise ``anneal_steps`` is set to ``training.n_steps - DEFAULT_TAIL_WINDOW``
+        (= ``800 - 100 = 700``, with ``min_tau=0.0``) so the shipped blur reaches exactly zero
+        BEFORE the tail-averaging window begins — the point estimate is the mean of the trailing
+        ``tail_window`` steps, so the whole window must run at ``sigma=0`` (IZ Sec 4.2). The
+        ``InstanceNoiseConfig`` default ``anneal_steps`` (2000) would otherwise ship a
+        residually-blurred (non-consistent) config that both the container guard and
+        ``EstimatorConfig.from_configs`` reject.
+        """
+        training = TrainingConfig()
         return cls(
             graph=GraphConfig(),
             model=ModelConfig(),
-            training=TrainingConfig(),
-            instance_noise=InstanceNoiseConfig(),
+            training=training,
+            instance_noise=InstanceNoiseConfig(
+                anneal_steps=training.n_steps - DEFAULT_TAIL_WINDOW, min_tau=0.0
+            ),
             true_params=TrueParams(),
             init_params=InitParams(),
         )
 
     @classmethod
     def mc_default(cls) -> ExperimentConfig:
-        """Create Monte Carlo-scaled configuration from the MC design document."""
+        """Fast-scale Monte Carlo configuration executed by the live runner.
+
+        This is the configuration ``experiments/asymptotic_mc_experiment.py`` builds
+        for the asymptotic Monte Carlo study: a Barabasi-Albert graph
+        (``graph_type='ba'``, ``n_nodes=10000``) with uniform root sampling — the
+        smaller, faster counterpart to the paper-scale :meth:`default`.
+        """
         return cls(
             graph=GraphConfig(
                 n_nodes=10000,
@@ -762,16 +860,15 @@ class ExperimentConfig:
                 disjoint_relax_sequence=(0,),
                 disjoint_fallback="best",
                 min_roots_per_call=17,
-                mix_p_uniform=0.0,
             ),
             instance_noise=InstanceNoiseConfig(
                 enabled=True,
-                tau_x0=1.0,
                 tau_y0=1.0,
                 schedule="linear",
-                anneal_steps=2000,
+                # n_steps=900 - DEFAULT_TAIL_WINDOW (100) so the blur reaches zero before the
+                # trailing tail-averaging window (IZ Sec 4.2 sigma -> 0 over the whole window).
+                anneal_steps=900 - DEFAULT_TAIL_WINDOW,
                 min_tau=0.0,
-                apply_to="both",
             ),
             true_params=TrueParams(
                 beta=0.4,
@@ -884,9 +981,6 @@ class EffortModelConfig:
     matches the extracted ego radius.
     """
 
-    logit_clip: float = 10.0
-    """Discriminator logit clip bound."""
-
     def resolved_discriminator_layers(self) -> int:
         """Resolve discriminator message-passing depth."""
         if self.discriminator_layers is None:
@@ -927,8 +1021,6 @@ class EffortModelConfig:
                 f"aggregate the full {self.k}-hop ego context; got "
                 f"{self.resolved_discriminator_layers()} < {self.k}"
             )
-        if self.logit_clip <= 0.0:
-            raise ValueError(f"logit_clip must be positive, got {self.logit_clip}")
 
 
 @dataclass(frozen=True)
@@ -960,6 +1052,9 @@ class EffortExperimentConfig:
                 "resolved discriminator_layers must be >= k for effort-game "
                 "identification context."
             )
+        _assert_blur_anneals_to_zero(
+            self.instance_noise, self.training.n_steps, "EffortExperimentConfig"
+        )
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -985,7 +1080,11 @@ class EffortExperimentConfig:
                 lr_g=7e-3,
                 grad_clip_norm_g=25.0,
             ),
-            instance_noise=InstanceNoiseConfig(tau_y0=1.5, anneal_steps=2500),
+            # n_steps=2000 - DEFAULT_TAIL_WINDOW (100): the blur reaches zero before the trailing
+            # tail-averaging window so the tail-averaged estimate is blur-free (IZ Sec 4.2).
+            instance_noise=InstanceNoiseConfig(
+                tau_y0=1.5, anneal_steps=2000 - DEFAULT_TAIL_WINDOW, min_tau=0.0
+            ),
             true_params=EffortTrueParams(),
             init_params=EffortInitParams(),
         )
